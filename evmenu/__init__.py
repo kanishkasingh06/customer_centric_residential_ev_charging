@@ -18,6 +18,11 @@ from .feasibility import (
     request_is_feasible,
     required_grid_energy_kwh,
 )
+from .profiles import (
+    ConstructedProfile,
+    build_immediate_charging_profile,
+    build_minimum_cost_charging_profile,
+)
 from .schemas import (
     ChargingProfile,
     ChargingSession,
@@ -34,6 +39,7 @@ __all__ = [
     "ChargingProfile",
     "ChargingSession",
     "Chemistry",
+    "ConstructedProfile",
     "EVMenuError",
     "EVSpec",
     "MenuOffer",
@@ -50,6 +56,8 @@ __all__ = [
     "ValidationReport",
     "ValidationTolerances",
     "available_grid_energy_kwh",
+    "build_immediate_charging_profile",
+    "build_minimum_cost_charging_profile",
     "build_target_options",
     "compute_buffer_energy",
     "delivered_target_energy_kwh",
