@@ -10,7 +10,7 @@ class PhysicalConstraintError(EVMenuError, ValueError):
 
 
 class SignalValidationError(EVMenuError, ValueError):
-    """Raised when a daily signal is malformed or internally inconsistent."""
+    """Raised when a planning signal is malformed or internally inconsistent."""
 
 
 class SchemaValidationError(EVMenuError, ValueError):

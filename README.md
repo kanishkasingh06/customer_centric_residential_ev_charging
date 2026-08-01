@@ -1,53 +1,71 @@
-# Daily EV Menu — Commit 1
+# Daily EV Menu — Commit 2
 
-Commit 1 establishes immutable schemas and domain exceptions only. It does not
-yet construct or physically validate charging trajectories.
-
-Included:
-
-- `EVSpec`
-- `ChargingSession`
-- `PlanningSignal`
-- `TargetOption`
-- `ChargingProfile`
-- `MenuOffer`
-- `MenuSettings`
-- domain-specific exceptions and schema tests
-
-Not included yet:
-
-- physical trajectory validation
-- charging-profile construction or optimization
-- menu generation or customer choice
-- Monte Carlo simulation
-- distribution-network simulation
-- degradation equations
+Commit 2 adds deterministic feasibility calculations and an independent
+cross-object validator on top of the immutable Commit 1 schemas. It does not
+construct or optimize charging profiles.
 
 ## Conventions
 
-- `PlanningSignal` represents an arbitrary contiguous planning horizon. Step 0
-  is its first represented interval; it is not necessarily midnight.
-- Residential overnight sessions are supported when the planning horizon
-  includes every interval through `departure_step`.
+- `PlanningSignal` is an arbitrary contiguous horizon: step `0` is its first
+  represented interval, not necessarily midnight, and it must cover the full
+  session window.
 - Charging windows are half-open: `[arrival_step, departure_step)`. Arrival is
   inclusive and departure is exclusive.
-- Ready-step restrictions are not enforced in Commit 1. A later cross-object
-  physical validator will enforce charging only before an offer's ready step.
-- Grid-side charging power is measured in kW and grid-side interval energy in
-  kWh. Battery energy and SOC are battery-side state quantities.
-- For `N` charging intervals, `power_kw` and `grid_energy_kwh` have `N` values;
-  `battery_energy_kwh` and `soc` have `N + 1` boundary-state values.
-- `battery_capacity_kwh` is usable battery-side maximum energy `B_max`, not
-  nominal/nameplate capacity. `minimum_energy_kwh` is the absolute battery
-  floor `B_min`.
-- `charging_efficiency` is grid-to-battery efficiency:
-  `battery energy increase / grid energy drawn`.
-- Prices are finite and may be negative. Base load is non-negative.
-- `battery_temperature_c` is representative battery/pack temperature in
-  degrees Celsius, not ambient temperature.
-- Schemas reject locally invalid values without clipping. Cross-object checks
-  such as charger limits, energy recursion, SOC consistency, signal alignment,
-  and ready-time restrictions remain intentionally unimplemented.
+- A Commit 2 profile must start exactly at `session.arrival_step` and cover
+  exactly every interval through, but not including, `session.departure_step`.
+  For `N = departure_step - arrival_step`, `power_kw` and
+  `grid_energy_kwh` have `N` entries, while `battery_energy_kwh` and `soc` have
+  `N + 1` boundary states.
+- Local profile interval `k` maps to global planning step
+  `profile.start_step + k`; with the exact-session rule this is
+  `session.arrival_step + k`.
+- `ready_step` is a boundary state. Charging is forbidden for every interval
+  whose step is at or after `ready_step`; therefore a profile ready at arrival
+  is valid only when no charging is needed, and `ready_step == departure_step`
+  is represented by the terminal state.
+- Grid-side power and interval energy are distinct from battery-side energy.
+  Battery increases by `charging_efficiency * grid_energy_kwh`.
+- `battery_capacity_kwh` is usable battery-side capacity (`B_max`), and
+  `minimum_energy_kwh` is the absolute battery floor (`B_min`).
+
+## Feasibility
+
+The population buffer rule is applied once, before constructing a
+`ChargingSession`:
+
+```text
+b = max(base_buffer_kwh, commute_buffer_fraction * commute_energy_kwh)
+```
+
+The resulting `buffer_energy_kwh` is finalized session data. Feasibility and
+validation consume that value directly and never apply the rule again. Public
+numeric inputs reject booleans, strings, NaN, and infinities.
+
+Commit 2 uses the fixed standard targets `(0.80, 0.90, 1.00)`. Personalized
+`z_min = (B_min + commute + buffer) / B_max` is never clipped: values above
+`1.0` are a physical error, while exactly `1.0` is valid. Standard targets
+below the service requirement are omitted. Targets within the configurable
+`target_merge_tolerance` are merged, retaining the larger numeric target and
+all deterministic provenance sources.
+
+## Independent validation
+
+`validate_charging_profile` returns a `ValidationReport` for physically
+incompatible but well-formed EV/session/signal/profile combinations. The
+report's primary API is an ordered tuple of frozen `ValidationIssue` objects
+with stable `ValidationCode` values, interval indices where applicable, and
+observed/expected diagnostics. `report.is_valid` is derived from whether the
+issue tuple is empty; `report.errors` remains a compatibility view of messages.
+
+`ValidationTolerances` separates strictly positive finite tolerances for
+charger power (`power_kw`), energy identities and bounds (`energy_kwh`), and
+SOC consistency (`soc`).
+
+## Deferred to Commit 3
+
+Charging-profile construction, optimization, menu generation, cost and
+degradation calculations, customer choice modelling, Monte Carlo simulation,
+and distribution-network power flow are intentionally not implemented.
 
 ## Run checks
 
