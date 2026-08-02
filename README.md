@@ -1,111 +1,120 @@
-# Daily EV Menu — Commit 6
+# Daily EV Menu — Commit 7
 
-Commit 6 adds deterministic, fixed-request degradation-aware trajectory
-optimization and saving-frontier construction. It does not add Commit 7
-cross-request menu assembly or customer-choice functionality.
+Commit 7 assembles Commit 6 fixed-request saving frontiers into one immutable,
+deterministic customer menu.  The pipeline is:
 
-## Fixed-request model
+1. validate the complete Commit 4 `GeneratedMenu`;
+2. prune ready-step change points;
+3. build exactly one Commit 6 frontier per retained request;
+4. convert frontier points and BAUs into offers with explicit provenance;
+5. normalize health across the complete structural offer pool;
+6. filter non-positive savings, remove exact duplicates, compact requests,
+   Pareto-filter, and select the bounded display menu.
 
-For one Commit 4 `minimum_cost` candidate, the decision variables are grid-side
-energy values `E_grid[k]` for intervals
-`arrival_step <= k < ready_step`:
+## Request pruning
 
-```text
-0 <= E_grid[k] <= charger_power_kw * timestep_hours
-sum(E_grid[k]) = max(0, target_soc * B_max - B_initial) / eta
-```
+For each exact target SOC, only `minimum_cost` candidates are considered. Ready
+steps are sorted and duplicate ready steps are rejected. Candidates with saving
+at or below `positive_saving_tolerance` are excluded. The remaining maximum
+savings must be nondecreasing within `pruning_saving_tolerance`; a material
+decrease is rejected. A running maximum retains every strict increase. Each
+equal-saving plateau retains its latest ready step, and the latest positive
+request is always retained. Savings are currency values.
 
-The returned profile spans the complete session, has zero charging at and
-after `ready_step`, and is independently checked by the Commit 2 physical
-validator.
+## BAU and provenance
 
-The optimized trajectory objective is:
-
-```text
-J = charging-window calendar fade
-    + plating_guard_weight
-      * sum((eta * p_grid[k] / B_max)^2 * timestep_hours)
-```
-
-The calendar term uses beginning-of-interval SOC and the signal's global
-temperature indices. Parked-day and cycle fade remain in the Commit 5
-assessment after optimization; `trajectory_objective`/`objective_value` is not
-full total degradation. Peak C-rate can therefore make total-fade ordering
-different from trajectory-objective ordering.
-
-SciPy SLSQP receives `objective_scale * J` and an analytical Jacobian. Scaling
-is numerical only: returned objective values remain the original physical `J`.
-Solver success is never trusted without raw-vector checks, profile validation,
-cost recomputation, saving-band checks, and an independent objective
-recalculation.
-
-## Saving constraints
-
-The analytical Commit 4 minimum-cost profile is preserved exactly as the
-maximum-saving endpoint:
+Every target has exactly one immediate same-target BAU offer with zero saving.
+Optimized offers carry immutable `OfferSource` metadata mapping:
 
 ```text
-S_max = C_BAU - C_min_cost
+final offer ID -> frontier point ID -> source candidate ID -> endpoint role
 ```
 
-Before solving, Commit 6 computes the attainable saving interval using
-ascending-price and descending-price allocations. A requested band must
-intersect that interval. Negative savings and negative prices are valid.
+BAUs use source role `bau`; optimized points preserve their Commit 6 endpoint
+role. `source_frontiers` contains exactly the frontiers built for retained
+requests and is also available as `AssembledMenu.frontiers`.
 
-For requested saving `s` and band `delta`:
+## Health stage order
+
+All BAUs and all points from retained frontiers are scored together using total
+degradation fade, Commit 5's tiny-spread policy, resolution, and half-up
+quantization. Health is normalized once over that complete structural pool.
+Only then are positive-saving filtering, exact-duplicate removal, request-local
+compaction, Pareto filtering, and display selection applied. Health is not
+renormalized after reduction, so removing an extreme-fade offer after this
+stage does not change another offer's already-advertised score.
+
+Non-BAUs are retained only when:
 
 ```text
-s - delta <= C_BAU - C(profile) <= s + delta
+saving > positive_saving_tolerance
 ```
 
-Zero-width bands are supported when the requested cost is exactly attainable.
-Least-degradation uses a deterministic evenly spread feasible start; constrained
-solves interpolate between feasible minimum- and maximum-cost allocations so
-SLSQP never starts outside the saving band.
+Values are never clipped to zero. Targets without positive optimized offers
+retain their BAU only. A no-charge target therefore has one zero-energy BAU and
+no duplicate zero-saving optimized offer.
 
-## Results and frontier
+## Exact duplicates and compaction
 
-Each `OptimizedProfile` has:
+Exact duplicate non-BAUs are removed first, including equal target, ready step,
+saving, health, cost, profile, and degradation assessment. The lexicographically
+smallest offer ID wins. This applies even when `saving_merge_gap == 0` and does
+not cross request keys.
 
-- immutable validated profile and Commit 5 assessment;
-- unscaled `trajectory_objective` plus `objective_value` alias;
-- realized and requested savings;
-- source candidate ID, deterministic `point_id`, EV identity, and endpoint role.
+Compaction then operates only within `(target_soc, ready_step)`. Offers are
+sorted by saving and ID and use deterministic chain-connected clusters: the next
+offer joins the current cluster when its saving difference from the previous
+offer is strictly less than `saving_merge_gap`. Thus `0.00, 0.09, 0.18` is one
+cluster for a `0.10` gap. A difference exactly equal to the gap does not merge.
 
-Endpoint roles are `least_degradation`, `intermediate`, `maximum_saving`, or
-`least_and_maximum`. Exact duplicate endpoint/profile points collapse to one
-`least_and_maximum` point; this is exact duplicate handling, not Commit 7
-display compaction.
+The cluster winner is selected by higher quantized health; health differences
+within `health_tie_tolerance` use higher realized saving; a further tie uses the
+lexicographically smaller offer ID. The winner keeps its own profile,
+assessment, and provenance.
 
-`build_sandwich_saving_frontier` preserves the analytical maximum endpoint,
-then repeatedly requests the midpoint of the largest unresolved realized
-saving gap. Ties are deterministic. `maximum_levels` includes endpoints. The
-algorithm stops at the level cap or when every gap is no larger than
-`max(2 * saving_band, frontier_gap_tolerance)`, and rejects material
-trajectory-objective decreases along the useful branch.
+## Pareto rule
 
-## Public API
+Offer `a` dominates `b` when it is no later, has no lower target, no lower
+saving, and no lower health, with at least one strict improvement:
 
-- `FrontierSettings`
-- `OptimizedProfile`
-- `SavingFrontier`
-- `build_least_degradation_profile(...)`
-- `build_saving_constrained_profile(...)`
-- `build_sandwich_saving_frontier(...)`
+```text
+ready_a <= ready_b
+target_a >= target_b - target_dominance_tolerance
+saving_a >= saving_b - saving_dominance_tolerance
+health_a >= health_b - health_dominance_tolerance
+```
 
-`FrontierSettings` separates objective scaling, solver controls, bound/energy/
-saving/objective tolerances, frontier-gap tolerance, cost tolerance, and
-plating-guard weight. All numeric values reject booleans, NaN, and infinity.
+Ready steps use exact integer comparison. SOC, saving, and health use their
+separate tolerances and strict `>` comparisons beyond those tolerances. Exact
+duplicates are removed before Pareto filtering. BAUs are policy-protected and
+are never removed.
 
-## Deferred to Commit 7
+## Display selection
 
-- ready-step change-point pruning;
-- cross-request menu assembly;
-- savings-gap display compaction;
-- Pareto filtering;
-- display caps;
-- customer choice;
-- Monte Carlo simulation;
-- distribution-network simulation;
-- plotting; and
-- file I/O.
+`display_cap` includes BAUs. The mandatory set contains every BAU, the global
+maximum-saving non-BAU, and the global highest-health non-BAU. Anchor ties use:
+
+- maximum saving, then higher health, earlier ready step, higher target, lower ID;
+- maximum health, then higher saving, earlier ready step, higher target, lower ID.
+
+If the distinct mandatory set cannot fit, assembly raises
+`PhysicalConstraintError`; it never silently deletes a BAU or anchor. After
+mandatory anchors are reserved, ready-step diversity is best-effort and is
+processed in ascending ready-step order. Remaining slots use saving descending,
+health descending, readiness ascending, target descending, and ID ascending.
+
+Final presentation order is target SOC ascending, BAU before optimized, ready
+step ascending, saving ascending, health descending, and offer ID ascending.
+Selection priority and presentation order are intentionally separate.
+
+Assembly settings use separate finite, nonnegative tolerances for pruning,
+positive-saving filtering, compaction, saving dominance, health dominance,
+target dominance, and health ties. Saving units are currency, target units are
+SOC fractions, and health units are score points.
+
+## Deferred beyond Commit 7
+
+Commit 7 does not add customer-choice modelling, preference estimation,
+stochastic realization, Monte Carlo, multi-day state coupling, fleet
+aggregation, network simulation, plotting, reporting, file I/O, or experiment
+scripts.

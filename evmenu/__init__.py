@@ -1,5 +1,12 @@
 """Residential EV customer-menu package."""
 
+from .assembly import (
+    AssembledMenu,
+    MenuAssemblySettings,
+    OfferSource,
+    assemble_customer_menu,
+    prune_ready_step_change_points,
+)
 from .degradation import (
     DEFAULT_LFP_PARAMETERS,
     DEFAULT_NMC_PARAMETERS,
@@ -72,6 +79,7 @@ from .validation import (
 __all__ = [
     "DEFAULT_LFP_PARAMETERS",
     "DEFAULT_NMC_PARAMETERS",
+    "AssembledMenu",
     "CandidateKind",
     "ChargingProfile",
     "ChargingSession",
@@ -86,10 +94,12 @@ __all__ = [
     "EndpointRole",
     "FrontierSettings",
     "GeneratedMenu",
+    "MenuAssemblySettings",
     "MenuCandidate",
     "MenuGenerationSettings",
     "MenuOffer",
     "MenuSettings",
+    "OfferSource",
     "OptimizedProfile",
     "PhysicalConstraintError",
     "PlanningSignal",
@@ -103,6 +113,7 @@ __all__ = [
     "ValidationIssue",
     "ValidationReport",
     "ValidationTolerances",
+    "assemble_customer_menu",
     "assess_candidate_degradation",
     "available_grid_energy_kwh",
     "build_immediate_charging_profile",
@@ -118,6 +129,7 @@ __all__ = [
     "generate_candidate_menu",
     "minimum_required_departure_energy_kwh",
     "minimum_required_target_soc",
+    "prune_ready_step_change_points",
     "request_is_feasible",
     "required_grid_energy_kwh",
     "score_generated_menu",
