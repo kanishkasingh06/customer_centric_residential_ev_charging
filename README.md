@@ -1,128 +1,110 @@
-# Daily EV Menu — Commit 5
+# Daily EV Menu — Commit 6
 
-Commit 5 annotates the existing Commit 4 candidate menu with chemistry-aware,
-additive degradation assessments and a deterministic relative health score. It
-does not construct new charging trajectories or remove existing candidates.
+Commit 6 adds deterministic, fixed-request degradation-aware trajectory
+optimization and saving-frontier construction. It does not add Commit 7
+cross-request menu assembly or customer-choice functionality.
 
-## Degradation units and model
+## Fixed-request model
 
-Every fade value is a fraction of usable battery capacity: `0.01` means 1%
-capacity fade. For each existing candidate:
-
-```text
-total_fade = window_calendar_fade + parked_day_fade + cycle_fade
-```
-
-Calendar SOC stress is chemistry-specific:
+For one Commit 4 `minimum_cost` candidate, the decision variables are grid-side
+energy values `E_grid[k]` for intervals
+`arrival_step <= k < ready_step`:
 
 ```text
-g(s) = a0 + a1*s + a2*max(s - s_knee, 0)^2
+0 <= E_grid[k] <= charger_power_kw * timestep_hours
+sum(E_grid[k]) = max(0, target_soc * B_max - B_initial) / eta
 ```
 
-LFP and NMC parameters are separate, immutable, case-sensitive parameter sets.
-The defaults reproduce representative 30°C, one-year calendar anchors:
+The returned profile spans the complete session, has zero charging at and
+after `ready_step`, and is independently checked by the Commit 2 physical
+validator.
 
-- LFP: 1.00%/year at 50% SOC and 1.24%/year at 100% SOC;
-- NMC: 1.78%, 2.41%, and 3.02%/year at 50%, 80%, and 100% SOC.
-
-These are representative calibrated scenario defaults, not publication-grade
-cell-specific fitted coefficients.
-
-Calendar temperature scaling uses Celsius inputs converted once to Kelvin and
-the Arrhenius expression. Calendar age uses the local time-power-law slope
-relative to a one-year reference age. Age is measured in years.
-
-The charging-window term samples exactly the beginning-of-interval SOC states
-(`profile.soc[:-1]`) for the `N` session intervals. The terminal state is not
-counted as an additional interval. The parked-day temperature proxy is the
-final in-session signal temperature at `session.departure_step - 1`.
-
-Parked SOC is calculated as:
+The optimized trajectory objective is:
 
 ```text
-parked_energy = max(target_soc * B_max, initial_energy) - commute_energy
-parked_soc = parked_energy / B_max
+J = charging-window calendar fade
+    + plating_guard_weight
+      * sum((eta * p_grid[k] / B_max)^2 * timestep_hours)
 ```
 
-Commute energy is battery-side, charging efficiency is not applied to it, and
-buffer energy is not subtracted again. Values outside `[0, 1]` are rejected;
-they are never silently clipped.
+The calendar term uses beginning-of-interval SOC and the signal's global
+temperature indices. Parked-day and cycle fade remain in the Commit 5
+assessment after optimization; `trajectory_objective`/`objective_value` is not
+full total degradation. Peak C-rate can therefore make total-fade ordering
+different from trajectory-objective ordering.
 
-Cycle fade uses battery-side session throughput, depth fraction, and battery-
-side peak C-rate:
+SciPy SLSQP receives `objective_scale * J` and an analytical Jacobian. Scaling
+is numerical only: returned objective values remain the original physical `J`.
+Solver success is never trusted without raw-vector checks, profile validation,
+cost recomputation, saving-band checks, and an independent objective
+recalculation.
+
+## Saving constraints
+
+The analytical Commit 4 minimum-cost profile is preserved exactly as the
+maximum-saving endpoint:
 
 ```text
-throughput = eta * sum(grid_energy)
-peak_c_rate = eta * max(grid_power) / B_max
+S_max = C_BAU - C_min_cost
 ```
 
-C-rate has units of `h^-1`, conventionally written as C. Zero cumulative FEC is
-allowed. The local cycle-age slope uses a configurable positive
-`minimum_reference_fec` regularization so a new battery remains finite; zero
-throughput still produces zero cycle fade.
+Before solving, Commit 6 computes the attainable saving interval using
+ascending-price and descending-price allocations. A requested band must
+intersect that interval. Negative savings and negative prices are valid.
 
-Annualized degradation is scenario-based:
+For requested saving `s` and band `delta`:
 
 ```text
-annualized_degradation_pct = total_fade * equivalent_sessions_per_year * 100
+s - delta <= C_BAU - C(profile) <= s + delta
 ```
 
-The default is 300 equivalent service sessions per year. Each assessment
-represents one charging window, the configured parked-day dwell, and one cycle
-contribution. Parked fade is included once per equivalent session. This is not
-an absolute laboratory life prediction.
+Zero-width bands are supported when the requested cost is exactly attainable.
+Least-degradation uses a deterministic evenly spread feasible start; constrained
+solves interpolate between feasible minimum- and maximum-cost allocations so
+SLSQP never starts outside the saving band.
 
-## Health score
+## Results and frontier
 
-For one EV/session, all generated candidates are normalized together:
+Each `OptimizedProfile` has:
 
-```text
-spread = max_fade - min_fade
-normalized = (fade - min_fade) / spread
-raw_health = 100 * (1 - normalized)
-```
+- immutable validated profile and Commit 5 assessment;
+- unscaled `trajectory_objective` plus `objective_value` alias;
+- realized and requested savings;
+- source candidate ID, deterministic `point_id`, EV identity, and endpoint role.
 
-If `spread` is at or below `degradation_comparison_tolerance`, every candidate
-receives 100. Otherwise scores are quantized with explicit half-up rounding:
+Endpoint roles are `least_degradation`, `intermediate`, `maximum_saving`, or
+`least_and_maximum`. Exact duplicate endpoint/profile points collapse to one
+`least_and_maximum` point; this is exact duplicate handling, not Commit 7
+display compaction.
 
-```text
-quantized = resolution * floor(raw_health / resolution + 0.5)
-```
+`build_sandwich_saving_frontier` preserves the analytical maximum endpoint,
+then repeatedly requests the midpoint of the largest unresolved realized
+saving gap. Ties are deterministic. `maximum_levels` includes endpoints. The
+algorithm stops at the level cap or when every gap is no larger than
+`max(2 * saving_band, frontier_gap_tolerance)`, and rejects material
+trajectory-objective decreases along the useful branch.
 
-A tiny floating-point epsilon is used at exact boundaries, then scores are
-clamped to `[0, 100]`. The default resolution is 5 points. Health is a
-within-menu relative score, not absolute state of health, remaining battery
-life, or a cross-EV comparison metric.
+## Public API
 
-## Public workflow
+- `FrontierSettings`
+- `OptimizedProfile`
+- `SavingFrontier`
+- `build_least_degradation_profile(...)`
+- `build_saving_constrained_profile(...)`
+- `build_sandwich_saving_frontier(...)`
 
-```python
-candidate_menu = generate_candidate_menu(
-    ev=ev,
-    session=session,
-    signal=signal,
-)
+`FrontierSettings` separates objective scaling, solver controls, bound/energy/
+saving/objective tolerances, frontier-gap tolerance, cost tolerance, and
+plating-guard weight. All numeric values reject booleans, NaN, and infinity.
 
-scored_menu = score_generated_menu(
-    ev=ev,
-    session=session,
-    signal=signal,
-    menu=candidate_menu,
-)
-```
+## Deferred to Commit 7
 
-`scored_menu.offers` preserves candidate count, order, IDs, candidate metadata,
-costs, savings, profiles, and validation reports. Every offer has one matching
-immutable degradation assessment.
-
-## Still deferred to Commit 6
-
-- least-degradation trajectory optimization;
-- intermediate saving-health profiles;
-- anchored saving levels;
+- ready-step change-point pruning;
+- cross-request menu assembly;
+- savings-gap display compaction;
 - Pareto filtering;
 - display caps;
-- customer-choice modelling;
+- customer choice;
 - Monte Carlo simulation;
 - distribution-network simulation;
 - plotting; and
