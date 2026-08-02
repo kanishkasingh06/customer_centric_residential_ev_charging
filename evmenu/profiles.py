@@ -136,7 +136,10 @@ def _build_profile_from_grid_energy(
     if len(grid_energy_kwh) != expected_intervals:
         raise SchemaValidationError("grid-energy allocation must span the exact session.")
 
-    power_kw = tuple(energy / signal.timestep_hours for energy in grid_energy_kwh)
+    power_kw = tuple(
+        energy / signal.interval_durations[session.arrival_step + local_index]
+        for local_index, energy in enumerate(grid_energy_kwh)
+    )
     battery_energy = [session.initial_energy_kwh]
     for energy in grid_energy_kwh:
         battery_energy.append(battery_energy[-1] + ev.charging_efficiency * energy)
@@ -222,10 +225,12 @@ def build_immediate_charging_profile(
     validation_tolerances = _resolve_tolerances(tolerances)
     target = _validate_common_inputs(ev, session, signal, target_soc)
     required_energy = required_grid_energy_kwh(ev, session, target)
-    interval_capacity = ev.charger_power_kw * signal.timestep_hours
     session_intervals = session.departure_step - session.arrival_step
-
-    total_capacity = interval_capacity * session_intervals
+    capacities = [
+        ev.charger_power_kw * signal.interval_durations[session.arrival_step + index]
+        for index in range(session_intervals)
+    ]
+    total_capacity = sum(capacities)
     if required_energy > total_capacity:
         raise PhysicalConstraintError("target cannot be reached before departure.")
 
@@ -235,7 +240,7 @@ def build_immediate_charging_profile(
     for local_index in range(session_intervals):
         if remaining <= 0.0:
             break
-        energy = min(interval_capacity, remaining)
+        energy = min(capacities[local_index], remaining)
         allocation[local_index] = energy
         remaining -= energy
         last_used_local = local_index
@@ -282,8 +287,10 @@ def build_minimum_cost_charging_profile(
 
     Since charging efficiency and the charger limit are constant, the linear
     cost problem is solved exactly by filling eligible intervals in ascending
-    price order. Price ties are resolved by earlier global time step, making
-    the constructor deterministic. A partial final interval is supported.
+    price order. Each interval's energy capacity is its own charger-power
+    limit times its duration. Price ties are resolved by earlier global time
+    step, making the constructor deterministic. A partial final interval is
+    supported.
     """
     validation_tolerances = _resolve_tolerances(tolerances)
     target = _validate_common_inputs(ev, session, signal, target_soc)
@@ -303,7 +310,6 @@ def build_minimum_cost_charging_profile(
 
     session_intervals = session.departure_step - session.arrival_step
     allocation = [0.0] * session_intervals
-    interval_capacity = ev.charger_power_kw * signal.timestep_hours
     remaining = feasibility.required_grid_energy_kwh
 
     eligible_steps = list(range(session.arrival_step, ready_step))
@@ -311,6 +317,7 @@ def build_minimum_cost_charging_profile(
     for global_step in eligible_steps:
         if remaining <= 0.0:
             break
+        interval_capacity = ev.charger_power_kw * signal.interval_durations[global_step]
         energy = min(interval_capacity, remaining)
         allocation[global_step - session.arrival_step] = energy
         remaining -= energy

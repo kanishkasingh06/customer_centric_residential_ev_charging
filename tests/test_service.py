@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -10,7 +11,11 @@ from evmenu import (
     EVModel,
     GeneratedCustomerMenu,
     PhysicalConstraintError,
+    PricePeriod,
     SchemaValidationError,
+    TimestampedPricePeriod,
+    TimestampedPriceProfile,
+    WeeklyPriceProfile,
     generate_ev_menu,
 )
 
@@ -141,7 +146,6 @@ def test_same_day_and_midnight_windows_have_exact_lengths() -> None:
     ("kwargs", "error"),
     [
         ({"arrival_time": "7pm"}, SchemaValidationError),
-        ({"departure_time": "07:10"}, PhysicalConstraintError),
         ({"current_soc": 1.1}, PhysicalConstraintError),
         ({"next_trip_distance_km": -1.0}, PhysicalConstraintError),
         ({"buffer_soc": -0.1}, PhysicalConstraintError),
@@ -164,6 +168,204 @@ def test_service_rejects_invalid_user_inputs(
     base.update(kwargs)
     with pytest.raises(error):
         generate_ev_menu(**base)  # type: ignore[arg-type]
+
+
+def test_arbitrary_minute_boundaries_are_preserved() -> None:
+    menu = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time="11:07",
+        departure_time="18:52",
+        current_soc=1.0,
+        next_trip_distance_km=0.0,
+        buffer_soc=0.0,
+    )
+    assert menu.arrival_time == "11:07"
+    assert menu.departure_time == "18:52"
+    assert menu.interval_start_times[0] == "11:07"
+    assert menu.interval_end_times[-1] == "18:52"
+    assert menu.interval_duration_minutes[0] == 8
+    assert menu.interval_duration_minutes[-1] == 7
+    assert sum(menu.interval_duration_minutes) == 465
+
+
+def test_one_minute_service_session_preserves_exact_interval_and_energy_cap() -> None:
+    menu = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time="19:02",
+        departure_time="19:03",
+        current_soc=0.999,
+        next_trip_distance_km=0.0,
+        buffer_soc=0.0,
+    )
+    assert menu.interval_start_minutes == (19 * 60 + 2,)
+    assert menu.interval_end_minutes == (19 * 60 + 3,)
+    assert menu.interval_duration_minutes == (1,)
+    assert len(menu.interval_duration_hours) == 1
+    assert menu.interval_duration_hours[0] * menu.ev_model.onboard_ac_power_kw == pytest.approx(
+        menu.ev_model.onboard_ac_power_kw / 60.0
+    )
+    assert all(len(row.charging_schedule_kw) == 1 for row in menu.offers)
+    assert max(max(offer.profile.grid_energy_kwh) for offer in menu.assembled_menu.offers) <= (
+        menu.ev_model.onboard_ac_power_kw / 60.0 + 1e-12
+    )
+
+
+@pytest.mark.parametrize(
+    ("arrival", "departure", "expected_prices"),
+    [
+        ("05:59", "06:01", (4.0, 7.0)),
+        ("06:00", "06:01", (7.0,)),
+        ("16:59", "17:01", (7.0, 10.0)),
+        ("17:00", "17:01", (10.0,)),
+        ("22:59", "23:01", (10.0, 5.0)),
+        ("23:00", "23:01", (5.0,)),
+        ("23:59", "00:01", (5.0, 4.0)),
+    ],
+)
+def test_builtin_tariff_boundaries_split_exactly(
+    arrival: str, departure: str, expected_prices: tuple[float, ...]
+) -> None:
+    menu = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time=arrival,
+        departure_time=departure,
+        current_soc=1.0,
+        next_trip_distance_km=0.0,
+        buffer_soc=0.0,
+    )
+    assert menu.interval_price_per_kwh == expected_prices
+    assert (
+        sum(menu.interval_duration_minutes)
+        == (
+            int(departure[:2]) * 60
+            + int(departure[3:])
+            - (int(arrival[:2]) * 60 + int(arrival[3:]))
+        )
+        % 1440
+    )
+
+
+def test_generated_menu_interval_metadata_rejects_malformed_aligned_vectors() -> None:
+    menu = _menu()
+    count = len(menu.interval_start_minutes)
+    with pytest.raises(SchemaValidationError):
+        replace(menu, interval_start_minutes=("bad",) * count)  # type: ignore[arg-type]
+    with pytest.raises(SchemaValidationError):
+        replace(menu, interval_end_minutes=(1.5,) * count)  # type: ignore[arg-type]
+    with pytest.raises(SchemaValidationError):
+        replace(menu, interval_duration_minutes=(True,) * count)
+    inconsistent = list(menu.interval_duration_minutes)
+    inconsistent[0] += 1
+    with pytest.raises(SchemaValidationError):
+        replace(menu, interval_duration_minutes=tuple(inconsistent))
+
+    gap = list(menu.interval_start_minutes)
+    gap[1] += 1
+    with pytest.raises(SchemaValidationError):
+        replace(menu, interval_start_minutes=tuple(gap))
+    overlap = list(menu.interval_start_minutes)
+    overlap[1] -= 1
+    with pytest.raises(SchemaValidationError):
+        replace(menu, interval_start_minutes=tuple(overlap))
+    reversed_end = list(menu.interval_end_minutes)
+    reversed_end[0] = menu.interval_start_minutes[0] - 1
+    with pytest.raises(SchemaValidationError):
+        replace(menu, interval_end_minutes=tuple(reversed_end))
+    with pytest.raises(SchemaValidationError):
+        replace(menu, interval_price_per_kwh=menu.interval_price_per_kwh[:-1])
+    altered_row = replace(menu.offers[0], charging_schedule_kw=(0.0,))
+    with pytest.raises(SchemaValidationError):
+        replace(menu, offers=(altered_row, *menu.offers[1:]))
+
+
+@pytest.mark.parametrize("label", ["", "  ", "Rs\x00", "x" * 65])
+def test_generated_menu_currency_label_is_validated(label: str) -> None:
+    with pytest.raises(SchemaValidationError):
+        replace(_menu(), currency_label=label)
+
+
+def test_weekly_custom_profile_splits_at_price_boundaries_and_preserves_metadata() -> None:
+    profile = WeeklyPriceProfile(
+        "weekly-demo",
+        (
+            PricePeriod(0, 12 * 60, 1.0),
+            PricePeriod(12 * 60, 18 * 60, -2.0),
+            PricePeriod(18 * 60, 10080, 3.0),
+        ),
+        currency_label="USD/kWh",
+    )
+    menu = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time="11:07",
+        departure_time="13:02",
+        current_soc=1.0,
+        next_trip_distance_km=0.0,
+        buffer_soc=0.0,
+        tariff="custom",
+        custom_price_profile=profile,
+        arrival_day="Mon",
+    )
+    assert menu.tariff_name == "custom"
+    assert menu.profile_id == "weekly-demo"
+    assert menu.currency_label == "USD/kWh"
+    assert menu.arrival_day == "Mon"
+    assert (menu.interval_start_times[0], menu.interval_end_times[-1]) == ("11:07", "13:02")
+    assert 12 * 60 in menu.interval_start_minutes
+    assert all(
+        len(row.charging_schedule_kw) == len(menu.interval_duration_minutes) for row in menu.offers
+    )
+    prices_at_noon = [
+        price
+        for start, price in zip(menu.interval_start_minutes, menu.interval_price_per_kwh)
+        if start == 12 * 60
+    ]
+    assert prices_at_noon == [-2.0]
+
+
+def test_custom_profile_requires_explicit_weekday() -> None:
+    profile = WeeklyPriceProfile("weekly", (PricePeriod(0, 10080, 1.0),))
+    with pytest.raises(SchemaValidationError, match="arrival_day"):
+        generate_ev_menu(
+            ev_model="generic_40kwh_lfp",
+            arrival_time="19:02",
+            departure_time="19:17",
+            current_soc=1.0,
+            next_trip_distance_km=0.0,
+            buffer_soc=0.0,
+            tariff="custom",
+            custom_price_profile=profile,
+        )
+
+
+def test_timestamped_custom_profile_crosses_midnight() -> None:
+    start = datetime(2026, 8, 3, 23, 0, tzinfo=UTC)
+    profile = TimestampedPriceProfile(
+        "timestamped-demo",
+        tuple(
+            TimestampedPricePeriod(
+                start + timedelta(hours=index), start + timedelta(hours=index + 1), price
+            )
+            for index, price in enumerate((1.0, 2.0, 3.0))
+        ),
+    )
+    menu = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time="23:53",
+        departure_time="01:08",
+        current_soc=1.0,
+        next_trip_distance_km=0.0,
+        buffer_soc=0.0,
+        tariff="custom",
+        custom_price_profile=profile,
+        arrival_date="2026-08-03",
+    )
+    assert menu.profile_id == "timestamped-demo"
+    assert menu.arrival_date == "2026-08-03"
+    assert menu.interval_duration_minutes[0] == 7
+    assert menu.interval_duration_minutes[-1] == 8
+    assert 1440 in menu.interval_start_minutes
+    assert 1.0 in menu.interval_price_per_kwh
+    assert 2.0 in menu.interval_price_per_kwh
 
 
 def test_trip_requirement_that_exceeds_capacity_is_rejected() -> None:

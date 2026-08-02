@@ -139,10 +139,12 @@ def available_grid_energy_kwh(
 
     Equation
     --------
-    ``E_avail(r) = p_max * (r - t_arr) * Delta_t``.
+    ``E_avail(r) = p_max * sum(Delta_t[k] for k before r)``.
     """
     _validate_ready_step(session, signal, ready_step)
-    return ev.charger_power_kw * (ready_step - session.arrival_step) * signal.timestep_hours
+    return ev.charger_power_kw * sum(
+        signal.interval_durations[step] for step in range(session.arrival_step, ready_step)
+    )
 
 
 def evaluate_request_feasibility(

@@ -66,6 +66,20 @@ def test_ready_time_available_energy_uses_half_open_window() -> None:
     assert available_grid_energy_kwh(ev(), session, signal(), ready_step=6) == pytest.approx(14.0)
 
 
+def test_available_energy_uses_each_interval_duration() -> None:
+    vehicle = EVSpec("EV", 40.0, 4.0, 7.0, 1.0, "LFP")
+    variable_signal = PlanningSignal(
+        0.25,
+        (1.0, 1.0),
+        interval_duration_hours=(8 / 60, 15 / 60),
+        nominal_timestep_minutes=15,
+    )
+    variable_session = ChargingSession(0, 2, 20.0, 0.0, 0.0)
+    assert available_grid_energy_kwh(
+        vehicle, variable_session, variable_signal, 2
+    ) == pytest.approx(7.0 * (23 / 60))
+
+
 def test_request_feasibility_boundary_and_partial_energy() -> None:
     vehicle = EVSpec("EV", 40.0, 4.0, 3.0, 1.0, "LFP")
     session = ChargingSession(0, 3, 20.0, 0.0, 0.0)

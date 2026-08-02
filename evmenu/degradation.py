@@ -456,7 +456,7 @@ def assess_candidate_degradation(
                 params.activation_energy_j_per_mol,
             )
             * age_factor
-            * signal.timestep_hours
+            * signal.interval_durations[global_step]
             / _HOURS_PER_YEAR
         )
 

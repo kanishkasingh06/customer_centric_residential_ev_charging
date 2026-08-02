@@ -12,6 +12,7 @@ from typing import Any, NoReturn, TextIO
 from .assembly import MenuAssemblySettings
 from .catalog import list_ev_models
 from .exceptions import EVMenuError
+from .pricing import load_price_profile_csv
 from .service import GeneratedCustomerMenu, generate_ev_menu
 
 
@@ -127,9 +128,9 @@ def build_parser(
     )
     generate.add_argument(
         "--tariff",
-        choices=("research_tou", "flat"),
+        choices=("research_tou", "flat", "custom"),
         default="research_tou",
-        help="illustrative research TOU or flat tariff",
+        help="illustrative research TOU, flat, or machine-readable custom tariff",
     )
     generate.add_argument(
         "--flat-price",
@@ -147,7 +148,7 @@ def build_parser(
         "--timestep-minutes",
         type=_positive_int,
         default=15,
-        help="interval duration; must divide 1440 and align with both times",
+        help="nominal wall-clock grid in minutes; must be a positive divisor of 1440",
     )
     generate.add_argument(
         "--display-cap",
@@ -165,6 +166,29 @@ def build_parser(
         "--include-schedule",
         action="store_true",
         help="include interval grid-power arrays in JSON output",
+    )
+    generate.add_argument(
+        "--include-intervals",
+        action="store_true",
+        help="include exact interval boundaries, durations, and prices in JSON output",
+    )
+    generate.add_argument(
+        "--price-profile",
+        help="CSV price profile path for --tariff custom",
+    )
+    generate.add_argument(
+        "--price-profile-format",
+        choices=("weekly", "hour_of_week", "timestamped"),
+        help="custom CSV schema (weekly, hour_of_week, or timestamped)",
+    )
+    generate.add_argument(
+        "--arrival-day",
+        choices=("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
+        help="arrival weekday for recurring weekly custom profiles",
+    )
+    generate.add_argument(
+        "--arrival-date",
+        help="arrival date YYYY-MM-DD for timestamped custom profiles",
     )
 
     subparsers.add_parser(
@@ -184,10 +208,15 @@ def build_parser(
     return parser
 
 
-def _menu_payload(menu: GeneratedCustomerMenu, *, include_schedule: bool) -> dict[str, object]:
+def _menu_payload(
+    menu: GeneratedCustomerMenu,
+    *,
+    include_schedule: bool,
+    include_intervals: bool,
+) -> dict[str, object]:
     offers: list[dict[str, object]] = []
     for row in menu.offers:
-        payload: dict[str, object] = {
+        row_payload: dict[str, object] = {
             "offer_id": row.offer_id,
             "ready_time": row.ready_time,
             "target_soc_percent": row.target_soc_percent,
@@ -198,9 +227,9 @@ def _menu_payload(menu: GeneratedCustomerMenu, *, include_schedule: bool) -> dic
             "role": row.role,
         }
         if include_schedule:
-            payload["charging_schedule_kw"] = list(row.charging_schedule_kw)
-        offers.append(payload)
-    return {
+            row_payload["charging_schedule_kw"] = list(row.charging_schedule_kw)
+        offers.append(row_payload)
+    payload: dict[str, object] = {
         "ev_model_id": menu.ev_model.model_id,
         "ev_model_name": menu.ev_model.display_name,
         "arrival_time": menu.arrival_time,
@@ -212,6 +241,26 @@ def _menu_payload(menu: GeneratedCustomerMenu, *, include_schedule: bool) -> dic
         "tariff_is_illustrative": menu.tariff_is_illustrative,
         "offers": offers,
     }
+    if menu.profile_id is not None:
+        payload["price_profile_id"] = menu.profile_id
+    payload["currency_label"] = menu.currency_label
+    if menu.arrival_day is not None:
+        payload["arrival_day"] = menu.arrival_day
+    if menu.arrival_date is not None:
+        payload["arrival_date"] = menu.arrival_date
+    if include_intervals:
+        payload["intervals"] = [
+            {
+                "start_time": menu.interval_start_times[index],
+                "end_time": menu.interval_end_times[index],
+                "start_minute": menu.interval_start_minutes[index],
+                "end_minute": menu.interval_end_minutes[index],
+                "duration_minutes": menu.interval_duration_minutes[index],
+                "price_per_kwh": menu.interval_price_per_kwh[index],
+            }
+            for index in range(len(menu.interval_start_minutes))
+        ]
+    return payload
 
 
 def _render_text(menu: GeneratedCustomerMenu, stream: TextIO) -> None:
@@ -228,12 +277,14 @@ def _render_text(menu: GeneratedCustomerMenu, stream: TextIO) -> None:
     )
     tariff_note = " (illustrative)" if menu.tariff_is_illustrative else ""
     print(
-        f"Tariff: {menu.tariff_name}{tariff_note} | Interval: {menu.timestep_minutes} min",
+        f"Tariff: {menu.tariff_name}{tariff_note} | Nominal interval: {menu.timestep_minutes} min | "
+        f"Generated intervals: {len(menu.interval_duration_minutes)}",
         file=stream,
     )
     print(file=stream)
     print(
-        "#  Ready  Target   Cost(currency)  Saving(currency)  Health(score)  Role",
+        f"#  Ready  Target   Cost({menu.currency_label})  "
+        f"Saving({menu.currency_label})  Health(score)  Role",
         file=stream,
     )
     for index, row in enumerate(menu.offers, start=1):
@@ -247,12 +298,22 @@ def _render_text(menu: GeneratedCustomerMenu, stream: TextIO) -> None:
         )
 
 
-def _run_generate(namespace: argparse.Namespace, *, stdout: TextIO) -> None:
+def _run_generate(
+    namespace: argparse.Namespace,
+    *,
+    stdout: TextIO,
+) -> None:
     assembly_settings = (
         MenuAssemblySettings(display_cap=namespace.display_cap)
         if namespace.display_cap is not None
         else None
     )
+    custom_profile = None
+    if namespace.price_profile is not None:
+        custom_profile = load_price_profile_csv(
+            namespace.price_profile,
+            profile_format=namespace.price_profile_format,
+        )
     menu = generate_ev_menu(
         ev_model=namespace.ev_model,
         arrival_time=namespace.arrival,
@@ -265,10 +326,17 @@ def _run_generate(namespace: argparse.Namespace, *, stdout: TextIO) -> None:
         battery_temperature_c=namespace.temperature_c,
         timestep_minutes=namespace.timestep_minutes,
         assembly_settings=assembly_settings,
+        custom_price_profile=custom_profile,
+        arrival_day=namespace.arrival_day,
+        arrival_date=namespace.arrival_date,
     )
     if namespace.format == "json":
         json.dump(
-            _menu_payload(menu, include_schedule=namespace.include_schedule),
+            _menu_payload(
+                menu,
+                include_schedule=namespace.include_schedule,
+                include_intervals=namespace.include_intervals,
+            ),
             stdout,
             indent=2,
             sort_keys=True,
@@ -314,6 +382,11 @@ def main(
                 "finite negative values supported",
                 file=out,
             )
+            print(
+                "custom\tMachine-readable CSV profile; use --price-profile and an explicit "
+                "weekly arrival day or timestamped arrival date",
+                file=out,
+            )
         else:
             if namespace.flat_price is not None and namespace.tariff != "flat":
                 print(
@@ -321,9 +394,68 @@ def main(
                     file=err,
                 )
                 return 2
+            if namespace.price_profile is not None and namespace.tariff != "custom":
+                print("evmenu: error: --price-profile requires --tariff custom", file=err)
+                return 2
+            if namespace.tariff == "custom" and namespace.price_profile is None:
+                print("evmenu: error: --tariff custom requires --price-profile", file=err)
+                return 2
+            if namespace.price_profile is not None and namespace.price_profile_format is None:
+                print(
+                    "evmenu: error: --price-profile-format is required with --price-profile",
+                    file=err,
+                )
+                return 2
+            if (
+                namespace.tariff == "custom"
+                and namespace.price_profile_format in ("weekly", "hour_of_week")
+                and namespace.arrival_date is not None
+            ):
+                print(
+                    "evmenu: error: weekly custom profiles reject --arrival-date; use --arrival-day",
+                    file=err,
+                )
+                return 2
+            if (
+                namespace.tariff == "custom"
+                and namespace.price_profile_format in ("weekly", "hour_of_week")
+                and namespace.arrival_day is None
+            ):
+                print("evmenu: error: weekly custom profiles require --arrival-day", file=err)
+                return 2
+            if (
+                namespace.tariff == "custom"
+                and namespace.price_profile_format == "timestamped"
+                and namespace.arrival_day is not None
+            ):
+                print(
+                    "evmenu: error: timestamped custom profiles reject --arrival-day; use --arrival-date",
+                    file=err,
+                )
+                return 2
+            if (
+                namespace.tariff == "custom"
+                and namespace.price_profile_format == "timestamped"
+                and namespace.arrival_date is None
+            ):
+                print("evmenu: error: timestamped custom profiles require --arrival-date", file=err)
+                return 2
+            if namespace.tariff != "custom" and (
+                namespace.price_profile_format is not None
+                or namespace.arrival_day is not None
+                or namespace.arrival_date is not None
+            ):
+                print("evmenu: error: custom profile options require --tariff custom", file=err)
+                return 2
             if namespace.include_schedule and namespace.format != "json":
                 print(
                     "evmenu: error: --include-schedule requires --format json",
+                    file=err,
+                )
+                return 2
+            if namespace.include_intervals and namespace.format != "json":
+                print(
+                    "evmenu: error: --include-intervals requires --format json",
                     file=err,
                 )
                 return 2

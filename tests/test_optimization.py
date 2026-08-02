@@ -437,6 +437,53 @@ def test_objective_jacobian_matches_finite_difference() -> None:
         assert analytical == pytest.approx(numerical, rel=1e-5, abs=1e-9)
 
 
+def test_objective_jacobian_matches_finite_difference_with_unequal_durations() -> None:
+    ev = _ev()
+    session = _session()
+    signal = PlanningSignal(
+        timestep_hours=0.25,
+        price_per_kwh=(1.0,) * 6,
+        battery_temperature_c=(30.0,) * 6,
+        interval_duration_hours=(0.10, 0.20, 0.30, 0.25, 0.25, 0.25),
+        nominal_timestep_minutes=15,
+    )
+    settings = FrontierSettings(plating_guard_weight=1e-3)
+    x = [0.2, 0.4, 0.6]
+    _, jacobian = optimization_module._objective_value_and_jac(
+        x,
+        ev=ev,
+        session=session,
+        signal=signal,
+        degradation_settings=DegradationSettings(),
+        frontier_settings=settings,
+    )
+    for index, analytical in enumerate(jacobian):
+        step = 1e-7
+        plus = x.copy()
+        minus = x.copy()
+        plus[index] += step
+        minus[index] -= step
+        numerical = (
+            optimization_module._trajectory_objective(
+                plus,
+                ev=ev,
+                session=session,
+                signal=signal,
+                degradation_settings=DegradationSettings(),
+                frontier_settings=settings,
+            )
+            - optimization_module._trajectory_objective(
+                minus,
+                ev=ev,
+                session=session,
+                signal=signal,
+                degradation_settings=DegradationSettings(),
+                frontier_settings=settings,
+            )
+        ) / (2.0 * step)
+        assert analytical == pytest.approx(numerical, rel=1e-5, abs=1e-8)
+
+
 def test_strong_plating_guard_prefers_equal_spread() -> None:
     ev, session, signal, candidate = _flexible_case(prices=(1.0,) * 6)
     result = build_least_degradation_profile(

@@ -220,6 +220,8 @@ def validate_charging_profile(
         zip(profile.power_kw, profile.grid_energy_kwh, strict=True)
     ):
         global_step = profile.start_step + local_index
+        if global_step >= signal.number_of_steps:
+            continue
         if power > ev.charger_power_kw + tolerances.power_kw:
             add(
                 ValidationCode.POWER_LIMIT,
@@ -228,7 +230,7 @@ def validate_charging_profile(
                 observed=power,
                 expected=ev.charger_power_kw,
             )
-        expected_grid_energy = power * signal.timestep_hours
+        expected_grid_energy = power * signal.interval_durations[global_step]
         grid_error = abs(grid_energy - expected_grid_energy)
         if grid_error > tolerances.energy_kwh:
             add(

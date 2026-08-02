@@ -53,6 +53,15 @@ from .optimization import (
     build_sandwich_saving_frontier,
     build_saving_constrained_profile,
 )
+from .pricing import (
+    PricePeriod,
+    TimestampedPricePeriod,
+    TimestampedPriceProfile,
+    WeeklyPriceProfile,
+    load_price_profile_csv,
+    load_timestamped_price_profile_csv,
+    load_weekly_price_profile_csv,
+)
 from .profiles import (
     ConstructedProfile,
     build_immediate_charging_profile,
@@ -70,6 +79,7 @@ from .schemas import (
     TargetSource,
 )
 from .service import CustomerMenuRow, GeneratedCustomerMenu, TariffName, generate_ev_menu
+from .timegrid import TimeInterval, build_time_intervals
 from .validation import (
     ValidationCode,
     ValidationIssue,
@@ -108,6 +118,7 @@ __all__ = [
     "OptimizedProfile",
     "PhysicalConstraintError",
     "PlanningSignal",
+    "PricePeriod",
     "RequestFeasibility",
     "SavingFrontier",
     "SchemaValidationError",
@@ -115,10 +126,14 @@ __all__ = [
     "TargetOption",
     "TargetSource",
     "TariffName",
+    "TimeInterval",
+    "TimestampedPricePeriod",
+    "TimestampedPriceProfile",
     "ValidationCode",
     "ValidationIssue",
     "ValidationReport",
     "ValidationTolerances",
+    "WeeklyPriceProfile",
     "assemble_customer_menu",
     "assess_candidate_degradation",
     "available_grid_energy_kwh",
@@ -128,6 +143,7 @@ __all__ = [
     "build_sandwich_saving_frontier",
     "build_saving_constrained_profile",
     "build_target_options",
+    "build_time_intervals",
     "calendar_soc_stress",
     "compute_buffer_energy",
     "delivered_target_energy_kwh",
@@ -136,6 +152,9 @@ __all__ = [
     "generate_ev_menu",
     "get_ev_model",
     "list_ev_models",
+    "load_price_profile_csv",
+    "load_timestamped_price_profile_csv",
+    "load_weekly_price_profile_csv",
     "minimum_required_departure_energy_kwh",
     "minimum_required_target_soc",
     "prune_ready_step_change_points",

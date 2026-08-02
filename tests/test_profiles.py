@@ -109,6 +109,26 @@ def test_immediate_uses_partial_final_interval() -> None:
     assert result.ready_step == 2
 
 
+def test_variable_duration_profile_reconstructs_power_and_energy() -> None:
+    vehicle = ev(power=4.0)
+    variable_signal = PlanningSignal(
+        0.25,
+        (1.0, 1.0),
+        interval_duration_hours=(8 / 60, 15 / 60),
+        nominal_timestep_minutes=15,
+    )
+    variable_session = ChargingSession(0, 2, 20.0, 0.0, 0.0)
+    result = build_immediate_charging_profile(
+        ev=vehicle,
+        session=variable_session,
+        signal=variable_signal,
+        target_soc=0.53,
+    )
+    assert result.profile.grid_energy_kwh == pytest.approx((4 * 8 / 60, 4 * 10 / 60))
+    assert result.profile.power_kw == pytest.approx((4.0, 8 / 3))
+    assert result.profile.battery_energy_kwh[-1] == pytest.approx(21.2)
+
+
 def test_immediate_no_charge_profile_is_full_session() -> None:
     result = build_immediate_charging_profile(
         ev=ev(),

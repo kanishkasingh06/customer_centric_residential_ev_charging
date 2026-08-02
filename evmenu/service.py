@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from math import isclose, isfinite
 from numbers import Real
-from typing import Literal
+from typing import Literal, cast
 
 from .assembly import AssembledMenu, MenuAssemblySettings, OfferSource, assemble_customer_menu
 from .catalog import EVModel, get_ev_model
@@ -13,10 +15,15 @@ from .degradation import DegradationSettings
 from .exceptions import PhysicalConstraintError, SchemaValidationError
 from .menu import MenuGenerationSettings, generate_candidate_menu
 from .optimization import FrontierSettings
+from .pricing import (
+    TimestampedPriceProfile,
+    WeeklyPriceProfile,
+)
 from .schemas import ChargingSession, MenuSettings, PlanningSignal
+from .timegrid import build_time_intervals, recurring_daily_boundaries
 from .validation import ValidationTolerances
 
-TariffName = Literal["research_tou", "flat"]
+TariffName = Literal["research_tou", "flat", "custom"]
 _CUSTOMER_ROLES = frozenset(
     {
         "bau",
@@ -52,6 +59,25 @@ def _parse_clock(name: str, value: object) -> int:
 
 def _format_clock(minutes: int) -> str:
     return f"{(minutes // 60) % 24:02d}:{minutes % 60:02d}"
+
+
+def _currency_label(value: object) -> str:
+    if not isinstance(value, str):
+        raise SchemaValidationError("currency_label must be a string.")
+    label = value.strip()
+    if not label:
+        raise SchemaValidationError("currency_label must be non-empty.")
+    if len(label) > 64 or any(ord(character) < 32 or ord(character) == 127 for character in label):
+        raise SchemaValidationError(
+            "currency_label must be at most 64 characters without control characters."
+        )
+    return label
+
+
+def _metadata_values(name: str, value: object) -> tuple[object, ...]:
+    if value is None or isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise SchemaValidationError(f"{name} must be a sequence.")
+    return tuple(value)
 
 
 def _tariff_price(name: TariffName, minute_of_day: int, flat_price: float) -> float:
@@ -128,6 +154,14 @@ class GeneratedCustomerMenu:
     tariff_is_illustrative: bool
     offers: tuple[CustomerMenuRow, ...]
     assembled_menu: AssembledMenu
+    profile_id: str | None = None
+    currency_label: str = "currency"
+    arrival_day: str | None = None
+    arrival_date: str | None = None
+    interval_start_minutes: tuple[int, ...] = ()
+    interval_end_minutes: tuple[int, ...] = ()
+    interval_duration_minutes: tuple[int, ...] = ()
+    interval_price_per_kwh: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.ev_model, EVModel):
@@ -140,8 +174,6 @@ class GeneratedCustomerMenu:
             raise SchemaValidationError("timestep_minutes must be an integer.")
         if self.timestep_minutes <= 0 or 1440 % self.timestep_minutes != 0:
             raise PhysicalConstraintError("timestep_minutes must be a positive divisor of 1440.")
-        if arrival_minute % self.timestep_minutes or departure_minute % self.timestep_minutes:
-            raise PhysicalConstraintError("arrival and departure must align to timestep_minutes.")
         current = _finite("current_soc", self.current_soc)
         distance = _finite("next_trip_distance_km", self.next_trip_distance_km)
         if not 0.0 <= current <= 1.0:
@@ -151,8 +183,9 @@ class GeneratedCustomerMenu:
         if not isinstance(self.tariff_name, str) or self.tariff_name not in (
             "research_tou",
             "flat",
+            "custom",
         ):
-            raise SchemaValidationError("tariff_name must be 'research_tou' or 'flat'.")
+            raise SchemaValidationError("tariff_name must be 'research_tou', 'flat', or 'custom'.")
         if not isinstance(self.assembled_menu, AssembledMenu):
             raise SchemaValidationError("assembled_menu must be an AssembledMenu.")
         if self.assembled_menu.ev_id != self.ev_model.model_id:
@@ -175,7 +208,62 @@ class GeneratedCustomerMenu:
         if row_ids != offer_ids:
             raise SchemaValidationError("customer rows are not aligned with assembled offers.")
         duration_minutes = (departure_minute - arrival_minute) % 1440
-        expected_steps = duration_minutes // self.timestep_minutes
+        departure_absolute = arrival_minute + duration_minutes
+        metadata = (
+            self.interval_start_minutes,
+            self.interval_end_minutes,
+            self.interval_duration_minutes,
+        )
+        if all(value == () for value in metadata):
+            intervals = build_time_intervals(
+                arrival_minute=arrival_minute,
+                departure_minute=departure_absolute,
+                nominal_timestep_minutes=self.timestep_minutes,
+            )
+            starts = tuple(interval.start_minute for interval in intervals)
+            ends = tuple(interval.end_minute for interval in intervals)
+            durations = tuple(interval.duration_minutes for interval in intervals)
+        else:
+            starts_values = _metadata_values("interval_start_minutes", self.interval_start_minutes)
+            ends_values = _metadata_values("interval_end_minutes", self.interval_end_minutes)
+            durations_values = _metadata_values(
+                "interval_duration_minutes", self.interval_duration_minutes
+            )
+            if any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for values in (starts_values, ends_values, durations_values)
+                for value in values
+            ):
+                raise SchemaValidationError("interval minute metadata must contain integers only.")
+            starts = cast(tuple[int, ...], starts_values)
+            ends = cast(tuple[int, ...], ends_values)
+            durations = cast(tuple[int, ...], durations_values)
+            if not starts or len(starts) != len(ends) or len(starts) != len(durations):
+                raise SchemaValidationError("interval metadata must be aligned and nonempty.")
+            if starts[0] % 1440 != arrival_minute or ends[-1] - starts[0] != duration_minutes:
+                raise SchemaValidationError("interval metadata must preserve exact session bounds.")
+            if any(end <= start for start, end in zip(starts, ends, strict=True)):
+                raise SchemaValidationError("interval metadata must have positive durations.")
+            if any(start != previous for previous, start in zip(ends, starts[1:])):
+                raise SchemaValidationError("interval metadata must be continuous.")
+            if any(
+                end - start != duration
+                for start, end, duration in zip(starts, ends, durations, strict=True)
+            ):
+                raise SchemaValidationError("interval duration metadata is inconsistent.")
+        expected_steps = len(starts)
+        price_values = _metadata_values("interval_price_per_kwh", self.interval_price_per_kwh)
+        prices = tuple(
+            _finite(f"interval_price_per_kwh[{index}]", value)
+            for index, value in enumerate(price_values)
+        )
+        if prices and len(prices) != expected_steps:
+            raise SchemaValidationError("interval prices must align with interval metadata.")
+        if self.profile_id is not None and (
+            not isinstance(self.profile_id, str) or not self.profile_id.strip()
+        ):
+            raise SchemaValidationError("profile_id must be non-empty when supplied.")
+        currency_label = _currency_label(self.currency_label)
         source_by_id = {source.offer_id: source for source in self.assembled_menu.source_metadata}
         for row, offer in zip(offers, self.assembled_menu.offers, strict=True):
             if (
@@ -183,8 +271,10 @@ class GeneratedCustomerMenu:
                 or len(offer.profile.power_kw) != expected_steps
             ):
                 raise SchemaValidationError("customer schedules must match session intervals.")
+            if offer.ready_step > expected_steps:
+                raise SchemaValidationError("offer ready_step exceeds interval boundaries.")
             expected_ready = _format_clock(
-                arrival_minute + offer.ready_step * self.timestep_minutes
+                starts[offer.ready_step] if offer.ready_step < expected_steps else ends[-1]
             )
             source = source_by_id[offer.offer_id]
             checks = (
@@ -206,6 +296,23 @@ class GeneratedCustomerMenu:
         object.__setattr__(self, "current_soc", current)
         object.__setattr__(self, "next_trip_distance_km", distance)
         object.__setattr__(self, "offers", offers)
+        object.__setattr__(self, "interval_start_minutes", starts)
+        object.__setattr__(self, "interval_end_minutes", ends)
+        object.__setattr__(self, "interval_duration_minutes", durations)
+        object.__setattr__(self, "interval_price_per_kwh", prices)
+        object.__setattr__(self, "currency_label", currency_label)
+
+    @property
+    def interval_duration_hours(self) -> tuple[float, ...]:
+        return tuple(value / 60.0 for value in self.interval_duration_minutes)
+
+    @property
+    def interval_start_times(self) -> tuple[str, ...]:
+        return tuple(_format_clock(value) for value in self.interval_start_minutes)
+
+    @property
+    def interval_end_times(self) -> tuple[str, ...]:
+        return tuple(_format_clock(value) for value in self.interval_end_minutes)
 
 
 def generate_ev_menu(
@@ -226,10 +333,17 @@ def generate_ev_menu(
     frontier_settings: FrontierSettings | None = None,
     assembly_settings: MenuAssemblySettings | None = None,
     validation_tolerances: ValidationTolerances | None = None,
+    custom_price_profile: WeeklyPriceProfile | TimestampedPriceProfile | None = None,
+    arrival_day: str | None = None,
+    arrival_date: str | None = None,
+    tariff: TariffName | None = None,
 ) -> GeneratedCustomerMenu:
     """Generate a deterministic customer menu without low-level schema construction.
 
-    Times use local 24-hour ``HH:MM`` notation. Arrival and departure must differ; explicit dates are deferred to the CLI/configuration layer. Catalogue and default tariff values are
+    Times use strict local 24-hour ``HH:MM`` notation. Arrival and departure
+    may be arbitrary minute values; no rounding is performed. With a custom
+    profile, pass a validated immutable weekly or timestamped profile and the
+    corresponding arrival day/date. Catalogue and built-in tariff values are
     research assumptions and are explicitly exposed in the returned result.
     """
     model = get_ev_model(ev_model)
@@ -250,17 +364,93 @@ def generate_ev_menu(
         raise SchemaValidationError("timestep_minutes must be an integer.")
     if timestep_minutes <= 0 or 1440 % timestep_minutes != 0:
         raise PhysicalConstraintError("timestep_minutes must be a positive divisor of 1440.")
-    if tariff_name not in ("research_tou", "flat"):
-        raise SchemaValidationError("tariff_name must be 'research_tou' or 'flat'.")
+    if tariff is not None:
+        if tariff_name != "research_tou" and tariff_name != tariff:
+            raise SchemaValidationError("tariff and tariff_name disagree.")
+        tariff_name = tariff
+    if tariff_name not in ("research_tou", "flat", "custom"):
+        raise SchemaValidationError("tariff_name must be 'research_tou', 'flat', or 'custom'.")
 
     arrival_minute = _parse_clock("arrival_time", arrival_time)
     departure_minute = _parse_clock("departure_time", departure_time)
-    if arrival_minute % timestep_minutes or departure_minute % timestep_minutes:
-        raise PhysicalConstraintError("arrival and departure must align to timestep_minutes.")
     duration_minutes = (departure_minute - arrival_minute) % 1440
     if duration_minutes == 0:
         raise PhysicalConstraintError("arrival_time and departure_time must differ.")
-    steps = duration_minutes // timestep_minutes
+    if tariff_name == "custom" and custom_price_profile is None:
+        raise SchemaValidationError("custom tariff requires custom_price_profile.")
+    if tariff_name != "custom" and custom_price_profile is not None:
+        raise SchemaValidationError("custom_price_profile requires tariff_name='custom'.")
+
+    profile_id: str | None = None
+    currency_label = "currency"
+    planning_arrival = arrival_minute
+    planning_departure = arrival_minute + duration_minutes
+    timestamped_start: datetime | None = None
+    additional_boundaries: tuple[int, ...] = ()
+    if tariff_name == "research_tou":
+        additional_boundaries = recurring_daily_boundaries(
+            start_minute=planning_arrival,
+            end_minute=planning_departure,
+            boundaries_of_day=(0, 6 * 60, 17 * 60, 23 * 60, 1440),
+        )
+        profile_id = "research_tou"
+    elif tariff_name == "custom":
+        if isinstance(custom_price_profile, WeeklyPriceProfile):
+            if arrival_day is None:
+                raise SchemaValidationError("weekly custom profiles require arrival_day.")
+            if not isinstance(arrival_day, str):
+                raise SchemaValidationError("arrival_day must be a weekday string.")
+            day = arrival_day.strip().title()
+            day_index = {
+                name: index
+                for index, name in enumerate(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
+            }.get(day)
+            if day_index is None:
+                raise SchemaValidationError(
+                    "arrival_day must be Mon, Tue, Wed, Thu, Fri, Sat, or Sun."
+                )
+            planning_arrival = day_index * 1440 + arrival_minute
+            planning_departure = planning_arrival + duration_minutes
+            additional_boundaries = custom_price_profile.absolute_boundaries(
+                start_minute=planning_arrival,
+                end_minute=planning_departure,
+            )
+            arrival_day = day
+            profile_id = custom_price_profile.profile_id
+            currency_label = custom_price_profile.currency_label
+        elif isinstance(custom_price_profile, TimestampedPriceProfile):
+            if arrival_date is None:
+                raise SchemaValidationError("timestamped custom profiles require arrival_date.")
+            if not isinstance(arrival_date, str):
+                raise SchemaValidationError("arrival_date must use YYYY-MM-DD format.")
+            try:
+                parsed_date = date.fromisoformat(arrival_date)
+            except ValueError as exc:
+                raise SchemaValidationError("arrival_date must use YYYY-MM-DD format.") from exc
+            profile_timezone = custom_price_profile.periods[0].start.tzinfo
+            timestamped_start = datetime.combine(
+                parsed_date, datetime.min.time(), tzinfo=profile_timezone
+            ) + timedelta(minutes=arrival_minute)
+            timestamped_end = timestamped_start + timedelta(minutes=duration_minutes)
+            additional_boundaries = custom_price_profile.boundaries_for_session(
+                timestamped_start,
+                timestamped_end,
+            )
+            planning_arrival = arrival_minute
+            planning_departure = arrival_minute + duration_minutes
+            additional_boundaries = tuple(arrival_minute + value for value in additional_boundaries)
+            profile_id = custom_price_profile.profile_id
+            currency_label = custom_price_profile.currency_label
+        else:
+            raise SchemaValidationError("custom_price_profile has an unsupported type.")
+
+    intervals = build_time_intervals(
+        arrival_minute=planning_arrival,
+        departure_minute=planning_departure,
+        nominal_timestep_minutes=timestep_minutes,
+        additional_boundaries=additional_boundaries,
+    )
+    steps = len(intervals)
 
     ev = model.to_ev_spec()
     initial_energy = current * ev.battery_capacity_kwh
@@ -293,18 +483,36 @@ def generate_ev_menu(
         commute_energy_kwh=commute_energy,
         buffer_energy_kwh=buffer_energy,
     )
-    prices = tuple(
-        _tariff_price(
-            tariff_name,
-            (arrival_minute + step * timestep_minutes) % 1440,
-            flat_price,
+    if tariff_name == "research_tou":
+        prices = tuple(
+            _tariff_price("research_tou", interval.start_minute % 1440, flat_price)
+            for interval in intervals
         )
-        for step in range(steps)
-    )
+    elif tariff_name == "flat":
+        prices = (flat_price,) * steps
+    elif isinstance(custom_price_profile, WeeklyPriceProfile):
+        prices = tuple(
+            custom_price_profile.price_at(interval.start_minute) for interval in intervals
+        )
+    else:
+        if timestamped_start is None or not isinstance(
+            custom_price_profile, TimestampedPriceProfile
+        ):
+            raise SchemaValidationError("timestamped custom profile is not configured.")
+        prices = tuple(
+            custom_price_profile.price_at(
+                timestamped_start + timedelta(minutes=interval.start_minute - arrival_minute)
+            )
+            for interval in intervals
+        )
     signal = PlanningSignal(
         timestep_hours=timestep_minutes / 60.0,
         price_per_kwh=prices,
         battery_temperature_c=(temperature,) * steps,
+        interval_duration_hours=tuple(interval.duration_hours for interval in intervals),
+        interval_start_minutes=tuple(interval.start_minute for interval in intervals),
+        interval_end_minutes=tuple(interval.end_minute for interval in intervals),
+        nominal_timestep_minutes=timestep_minutes,
     )
     generated = generate_candidate_menu(
         ev=ev,
@@ -331,7 +539,11 @@ def generate_ev_menu(
     rows = tuple(
         CustomerMenuRow(
             offer_id=offer.offer_id,
-            ready_time=_format_clock(arrival_minute + offer.ready_step * timestep_minutes),
+            ready_time=_format_clock(
+                intervals[offer.ready_step].start_minute
+                if offer.ready_step < len(intervals)
+                else intervals[-1].end_minute
+            ),
             target_soc_percent=offer.target_soc * 100.0,
             charging_cost=offer.charging_cost,
             saving=offer.advertised_saving,
@@ -353,4 +565,12 @@ def generate_ev_menu(
         tariff_is_illustrative=tariff_name == "research_tou",
         offers=rows,
         assembled_menu=assembled,
+        profile_id=profile_id,
+        currency_label=currency_label,
+        arrival_day=arrival_day,
+        arrival_date=arrival_date,
+        interval_start_minutes=tuple(interval.start_minute for interval in intervals),
+        interval_end_minutes=tuple(interval.end_minute for interval in intervals),
+        interval_duration_minutes=tuple(interval.duration_minutes for interval in intervals),
+        interval_price_per_kwh=prices,
     )

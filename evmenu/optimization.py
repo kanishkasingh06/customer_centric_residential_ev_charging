@@ -384,7 +384,10 @@ def _profile_from_energy(
     *,
     energy_tolerance: float = 0.0,
 ) -> ChargingProfile:
-    power = tuple(value / signal.timestep_hours for value in energy)
+    power = tuple(
+        value / signal.interval_durations[session.arrival_step + index]
+        for index, value in enumerate(energy)
+    )
     battery = [session.initial_energy_kwh]
     for value in energy:
         next_energy = battery[-1] + ev.charging_efficiency * value
@@ -410,8 +413,10 @@ def _cost(profile: ChargingProfile, signal: PlanningSignal) -> float:
 
 
 def _allocate_by_price(
-    prices: tuple[float, ...], required: float, cap: float, *, ascending: bool
+    prices: tuple[float, ...], capacities: tuple[float, ...], required: float, *, ascending: bool
 ) -> list[float]:
+    if len(prices) != len(capacities):
+        raise SchemaValidationError("prices and interval capacities must have equal lengths.")
     allocation = [0.0] * len(prices)
     remaining = required
     key = (
@@ -421,7 +426,7 @@ def _allocate_by_price(
     )
     indices = sorted(range(len(prices)), key=key)
     for index in indices:
-        amount = min(cap, remaining)
+        amount = min(capacities[index], remaining)
         allocation[index] = amount
         remaining -= amount
         if remaining <= 1e-12:
@@ -431,14 +436,20 @@ def _allocate_by_price(
     return allocation
 
 
-def _even_allocation(required: float, count: int, cap: float) -> list[float]:
+def _even_allocation(required: float, capacities: tuple[float, ...]) -> list[float]:
+    count = len(capacities)
     if required == 0.0:
         return [0.0] * count
     allocation: list[float] = []
     remaining = required
     for index in range(count):
         slots = count - index
-        value = min(cap, remaining / slots)
+        remaining_capacity = sum(capacities[index:])
+        if remaining_capacity <= 0.0:
+            raise PhysicalConstraintError("even initial allocation has no remaining capacity.")
+        future_capacity = sum(capacities[index + 1 :])
+        minimum_now = max(0.0, remaining - future_capacity)
+        value = min(capacities[index], max(minimum_now, remaining / slots))
         allocation.append(value)
         remaining -= value
     if abs(remaining) > 1e-8:
@@ -447,10 +458,10 @@ def _even_allocation(required: float, count: int, cap: float) -> list[float]:
 
 
 def _cost_range(
-    *, prices: tuple[float, ...], required: float, cap: float
+    *, prices: tuple[float, ...], capacities: tuple[float, ...], required: float
 ) -> tuple[list[float], list[float], float, float]:
-    minimum = _allocate_by_price(prices, required, cap, ascending=True)
-    maximum = _allocate_by_price(prices, required, cap, ascending=False)
+    minimum = _allocate_by_price(prices, capacities, required, ascending=True)
+    maximum = _allocate_by_price(prices, capacities, required, ascending=False)
     minimum_cost = sum(price * energy for price, energy in zip(prices, minimum, strict=True))
     maximum_cost = sum(price * energy for price, energy in zip(prices, maximum, strict=True))
     return minimum, maximum, minimum_cost, maximum_cost
@@ -478,14 +489,14 @@ def _saving_interval(
 def _saving_initial_allocation(
     *,
     prices: tuple[float, ...],
+    capacities: tuple[float, ...],
     required: float,
-    cap: float,
     bau_cost: float,
     requested_saving: float,
     settings: FrontierSettings,
 ) -> list[float]:
     minimum, maximum, minimum_cost, maximum_cost = _cost_range(
-        prices=prices, required=required, cap=cap
+        prices=prices, capacities=capacities, required=required
     )
     minimum_saving = bau_cost - maximum_cost
     maximum_saving = bau_cost - minimum_cost
@@ -548,18 +559,17 @@ def _objective_value_and_jac(
                 params.activation_energy_j_per_mol,
             )
             * age_factor
-            * signal.timestep_hours
+            * signal.interval_durations[global_index]
             / _HOURS_PER_YEAR
         )
         soc = states[local_index] / ev.battery_capacity_kwh
         stress = calendar_soc_stress(soc, params)
         objective += stress * factor
         weights.append(factor)
-        power = x[local_index] / signal.timestep_hours
+        duration_hours = signal.interval_durations[global_index]
+        power = x[local_index] / duration_hours
         battery_c_rate = ev.charging_efficiency * power / ev.battery_capacity_kwh
-        objective += (
-            frontier_settings.plating_guard_weight * battery_c_rate**2 * signal.timestep_hours
-        )
+        objective += frontier_settings.plating_guard_weight * battery_c_rate**2 * duration_hours
     jacobian = [0.0] * count
     for variable_index in range(count):
         for state_index in range(variable_index + 1, count):
@@ -577,7 +587,10 @@ def _objective_value_and_jac(
             * frontier_settings.plating_guard_weight
             * ev.charging_efficiency**2
             * x[variable_index]
-            / (signal.timestep_hours * ev.battery_capacity_kwh**2)
+            / (
+                signal.interval_durations[session.arrival_step + variable_index]
+                * ev.battery_capacity_kwh**2
+            )
         )
     return float(objective), jacobian
 
@@ -605,13 +618,15 @@ def _validate_solver_vector(
     raw_vector: object,
     *,
     count: int,
-    cap: float,
+    capacities: tuple[float, ...],
     required: float,
     prices: tuple[float, ...],
     bau_cost: float,
     requested_saving: float | None,
     settings: FrontierSettings,
 ) -> list[float]:
+    if len(capacities) != count:
+        raise SchemaValidationError("interval capacities must match the solver vector length.")
     if raw_vector is None or isinstance(raw_vector, (str, bytes)):
         raise PhysicalConstraintError("solver returned no usable decision vector.")
     try:
@@ -625,6 +640,7 @@ def _validate_solver_vector(
         if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value):
             raise PhysicalConstraintError("solver returned a non-finite decision value.")
         numeric = float(value)
+        cap = capacities[len(normalized)]
         if numeric < -settings.bound_tolerance or numeric > cap + settings.bound_tolerance:
             raise PhysicalConstraintError("solver returned a decision outside interval bounds.")
         if abs(numeric) <= settings.bound_tolerance:
@@ -774,20 +790,23 @@ def _solve(
     n_session = session.departure_step - session.arrival_step
     n_ready = candidate.ready_step - session.arrival_step
     required = required_grid_energy_kwh(ev, session, candidate.target_soc)
-    cap = ev.charger_power_kw * signal.timestep_hours
     prices = signal.price_per_kwh[session.arrival_step : candidate.ready_step]
+    capacities = tuple(
+        ev.charger_power_kw * signal.interval_durations[step]
+        for step in range(session.arrival_step, candidate.ready_step)
+    )
     if required == 0.0:
         x: list[float] = [0.0] * n_ready
     else:
         if n_ready <= 0:
             raise PhysicalConstraintError("positive-energy request has no eligible interval.")
         if requested_saving is None:
-            x = _even_allocation(required, n_ready, cap)
+            x = _even_allocation(required, capacities)
         else:
             x = _saving_initial_allocation(
                 prices=prices,
+                capacities=capacities,
                 required=required,
-                cap=cap,
                 bau_cost=bau_cost,
                 requested_saving=requested_saving,
                 settings=frontier_settings,
@@ -858,7 +877,7 @@ def _solve(
                 x,
                 jac=scaled_jacobian,
                 method="SLSQP",
-                bounds=[(0.0, cap)] * n_ready,
+                bounds=[(0.0, capacity) for capacity in capacities],
                 constraints=constraints,
                 options={
                     "ftol": frontier_settings.effective_solver_ftol,
@@ -873,7 +892,7 @@ def _solve(
         x = _validate_solver_vector(
             getattr(result, "x", None),
             count=n_ready,
-            cap=cap,
+            capacities=capacities,
             required=required,
             prices=prices,
             bau_cost=bau_cost,
@@ -1002,8 +1021,11 @@ def build_saving_constrained_profile(
     )
     _, _, minimum_cost, maximum_cost = _cost_range(
         prices=signal.price_per_kwh[session.arrival_step : candidate.ready_step],
+        capacities=tuple(
+            ev.charger_power_kw * signal.interval_durations[step]
+            for step in range(session.arrival_step, candidate.ready_step)
+        ),
         required=required_grid_energy_kwh(ev, session, candidate.target_soc),
-        cap=ev.charger_power_kw * signal.timestep_hours,
     )
     _saving_interval(
         bau_cost=numeric_bau_cost,

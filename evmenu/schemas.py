@@ -106,7 +106,7 @@ def _freeze_numeric_tuple(
     """Copy a numeric sequence to an immutable tuple and validate finiteness."""
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         raise error_type(f"{name} must be a sequence of finite real numbers.")
-    frozen = tuple([*values])
+    frozen = tuple(value for value in values)
     for index, value in enumerate(frozen):
         _require_finite(f"{name}[{index}]", value, error_type=error_type)
     return cast(tuple[float, ...], frozen)
@@ -116,7 +116,7 @@ def _freeze_target_sources(name: str, values: object) -> tuple[TargetSource, ...
     """Copy, validate, deduplicate-check, and canonically order target sources."""
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         raise SchemaValidationError(f"{name} must be a sequence of target sources.")
-    frozen = tuple([*values])
+    frozen = tuple(value for value in values)
     if not frozen:
         raise SchemaValidationError(f"{name} cannot be empty.")
     if any(source not in _VALID_TARGET_SOURCES for source in frozen):
@@ -199,9 +199,7 @@ class ChargingSession:
                 "initial_energy_kwh is below the EV minimum-energy floor."
             )
         if self.initial_energy_kwh > ev.battery_capacity_kwh:
-            raise PhysicalConstraintError(
-                "initial_energy_kwh exceeds the usable battery capacity."
-            )
+            raise PhysicalConstraintError("initial_energy_kwh exceeds the usable battery capacity.")
         if (
             ev.minimum_energy_kwh + self.commute_energy_kwh + self.buffer_energy_kwh
             > ev.battery_capacity_kwh
@@ -226,11 +224,13 @@ class PlanningSignal:
     price_per_kwh: tuple[float, ...]
     base_load_kw: tuple[float, ...] | None = None
     battery_temperature_c: tuple[float, ...] | None = None
+    interval_duration_hours: tuple[float, ...] | None = None
+    interval_start_minutes: tuple[int, ...] | None = None
+    interval_end_minutes: tuple[int, ...] | None = None
+    nominal_timestep_minutes: int | None = None
 
     def __post_init__(self) -> None:
-        _require_positive(
-            "timestep_hours", self.timestep_hours, error_type=SignalValidationError
-        )
+        _require_positive("timestep_hours", self.timestep_hours, error_type=SignalValidationError)
         price = _freeze_numeric_tuple(
             "price_per_kwh", self.price_per_kwh, error_type=SignalValidationError
         )
@@ -255,6 +255,65 @@ class PlanningSignal:
         )
 
         expected_length = len(price)
+        if self.interval_duration_hours is None:
+            durations = (float(self.timestep_hours),) * expected_length
+        else:
+            durations = _freeze_numeric_tuple(
+                "interval_duration_hours",
+                self.interval_duration_hours,
+                error_type=SignalValidationError,
+            )
+            if len(durations) != expected_length:
+                raise SignalValidationError(
+                    "interval_duration_hours must have the same length as price_per_kwh."
+                )
+            if any(value <= 0.0 for value in durations):
+                raise SignalValidationError("interval_duration_hours must be positive.")
+
+        if self.nominal_timestep_minutes is None:
+            nominal_minutes = max(1, round(float(self.timestep_hours) * 60.0))
+        else:
+            _require_step("nominal_timestep_minutes", self.nominal_timestep_minutes)
+            nominal_minutes = self.nominal_timestep_minutes
+        if nominal_minutes <= 0:
+            raise SignalValidationError("nominal_timestep_minutes must be positive.")
+
+        starts = self.interval_start_minutes
+        ends = self.interval_end_minutes
+        if (starts is None) != (ends is None):
+            raise SignalValidationError(
+                "interval_start_minutes and interval_end_minutes must be supplied together."
+            )
+        if starts is None:
+            start_values = tuple(range(expected_length))
+            end_values = tuple(range(1, expected_length + 1))
+        else:
+            if isinstance(starts, (str, bytes)) or not isinstance(starts, Sequence):
+                raise SignalValidationError(
+                    "interval_start_minutes must be a sequence of integers."
+                )
+            if isinstance(ends, (str, bytes)) or not isinstance(ends, Sequence):
+                raise SignalValidationError("interval_end_minutes must be a sequence of integers.")
+            start_values = tuple(starts)
+            end_values = tuple(ends)
+            if len(start_values) != expected_length or len(end_values) != expected_length:
+                raise SignalValidationError(
+                    "interval boundaries must have the same length as price_per_kwh."
+                )
+            for index, (start, end) in enumerate(zip(start_values, end_values, strict=True)):
+                if isinstance(start, bool) or not isinstance(start, int):
+                    raise SignalValidationError(
+                        f"interval_start_minutes[{index}] must be an integer."
+                    )
+                if isinstance(end, bool) or not isinstance(end, int):
+                    raise SignalValidationError(
+                        f"interval_end_minutes[{index}] must be an integer."
+                    )
+                if end <= start:
+                    raise SignalValidationError(f"interval {index} must have positive duration.")
+                if index and start != end_values[index - 1]:
+                    raise SignalValidationError("interval boundaries must be continuous.")
+
         if base_load is not None:
             if len(base_load) != expected_length:
                 raise SignalValidationError(
@@ -278,11 +337,28 @@ class PlanningSignal:
         object.__setattr__(self, "price_per_kwh", price)
         object.__setattr__(self, "base_load_kw", base_load)
         object.__setattr__(self, "battery_temperature_c", temperature)
+        object.__setattr__(self, "interval_duration_hours", durations)
+        object.__setattr__(self, "interval_start_minutes", start_values)
+        object.__setattr__(self, "interval_end_minutes", end_values)
+        object.__setattr__(self, "nominal_timestep_minutes", nominal_minutes)
 
     @property
     def number_of_steps(self) -> int:
         """Number of charging intervals in the planning horizon."""
         return len(self.price_per_kwh)
+
+    @property
+    def interval_duration_minutes(self) -> tuple[float, ...]:
+        """Interval durations in minutes, aligned with prices and temperatures."""
+        return tuple(hours * 60.0 for hours in self.interval_durations)
+
+    @property
+    def interval_durations(self) -> tuple[float, ...]:
+        """Canonical non-optional interval durations for scientific consumers."""
+        durations = self.interval_duration_hours
+        if durations is None:  # pragma: no cover - post-init always canonicalizes it
+            raise SignalValidationError("interval durations were not initialized.")
+        return durations
 
     def validate_session_window(self, session: ChargingSession) -> None:
         """Require the complete half-open session window to fit this horizon."""
@@ -340,9 +416,7 @@ class ChargingProfile:
             raise SchemaValidationError("start_step must be non-negative.")
 
         grid_energy = _freeze_numeric_tuple("grid_energy_kwh", self.grid_energy_kwh)
-        battery_energy = _freeze_numeric_tuple(
-            "battery_energy_kwh", self.battery_energy_kwh
-        )
+        battery_energy = _freeze_numeric_tuple("battery_energy_kwh", self.battery_energy_kwh)
         power = _freeze_numeric_tuple("power_kw", self.power_kw)
         soc = _freeze_numeric_tuple("soc", self.soc)
         object.__setattr__(self, "grid_energy_kwh", grid_energy)
@@ -354,9 +428,7 @@ class ChargingProfile:
         if number_of_steps == 0:
             raise SchemaValidationError("ChargingProfile must contain at least one interval.")
         if len(grid_energy) != number_of_steps:
-            raise SchemaValidationError(
-                "grid_energy_kwh and power_kw must have identical lengths."
-            )
+            raise SchemaValidationError("grid_energy_kwh and power_kw must have identical lengths.")
         if len(battery_energy) != number_of_steps + 1:
             raise SchemaValidationError(
                 "battery_energy_kwh must contain one more entry than power_kw."
@@ -366,17 +438,13 @@ class ChargingProfile:
 
         for index, value in enumerate(grid_energy):
             if value < 0.0:
-                raise PhysicalConstraintError(
-                    f"grid_energy_kwh[{index}] must be non-negative."
-                )
+                raise PhysicalConstraintError(f"grid_energy_kwh[{index}] must be non-negative.")
         for index, value in enumerate(power):
             if value < 0.0:
                 raise PhysicalConstraintError(f"power_kw[{index}] must be non-negative.")
         for index, value in enumerate(battery_energy):
             if value < 0.0:
-                raise PhysicalConstraintError(
-                    f"battery_energy_kwh[{index}] must be non-negative."
-                )
+                raise PhysicalConstraintError(f"battery_energy_kwh[{index}] must be non-negative.")
         for index, value in enumerate(soc):
             if not 0.0 <= value <= 1.0:
                 raise PhysicalConstraintError(f"soc[{index}] must lie in [0, 1].")
@@ -452,9 +520,7 @@ class MenuSettings:
         previous = -1.0
         for index, target in enumerate(targets):
             if not 0.0 < target <= 1.0:
-                raise PhysicalConstraintError(
-                    f"standard_targets[{index}] must lie in (0, 1]."
-                )
+                raise PhysicalConstraintError(f"standard_targets[{index}] must lie in (0, 1].")
             if target <= previous:
                 raise SchemaValidationError(
                     "standard_targets must be strictly increasing and unique."
