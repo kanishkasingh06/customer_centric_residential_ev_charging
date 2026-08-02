@@ -11,6 +11,9 @@ dependencies = [
   "scipy>=1.11",
 ]
 
+[project.scripts]
+evmenu = "evmenu.cli:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",

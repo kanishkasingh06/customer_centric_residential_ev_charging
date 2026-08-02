@@ -1,4 +1,4 @@
-# Daily EV Menu — Commit 7
+# Daily EV Menu — Commit 9
 
 Commit 7 assembles Commit 6 fixed-request saving frontiers into one immutable,
 deterministic customer menu.  The pipeline is:
@@ -166,3 +166,78 @@ Commit 8 does not add a CLI, external configuration files, manufacturer-data
 scraping, customer-choice modelling, Monte Carlo realization, multi-day state
 coupling, fleet/network simulation, plotting, or report generation.
 Dates, time zones, and sessions longer than one overnight cycle are deferred.
+
+## Command-line interface
+
+Commit 9 adds a standard-library command-line interface. The installed console command and
+module entry point are equivalent:
+
+Install the project from its checkout with:
+
+```bash
+python -m pip install .
+```
+
+```bash
+evmenu generate \
+  --ev-model generic_40kwh_lfp \
+  --arrival 19:00 \
+  --departure 07:00 \
+  --current-soc 35 \
+  --next-trip-km 45
+```
+
+```bash
+python -m evmenu generate \
+  --ev-model generic_40kwh_lfp \
+  --arrival 19:00 \
+  --departure 07:00 \
+  --current-soc 35 \
+  --next-trip-km 45
+```
+
+Unlike the Python service API, CLI SOC values are percentages: `35` means 35%, and the default
+`--buffer-soc 10` means 10% of usable capacity. Clock values remain strict local `HH:MM` strings.
+
+The required `generate` arguments are `--ev-model`, `--arrival`, `--departure`,
+`--current-soc`, and `--next-trip-km`. Optional defaults are:
+
+- `--buffer-soc 10` (percentage of usable capacity);
+- `--tariff research_tou`;
+- `--flat-price 7.0` currency/kWh when `--tariff flat` is selected;
+- `--temperature-c 30` degrees Celsius;
+- `--timestep-minutes 15`;
+- no `--display-cap` limit;
+- `--format text`.
+
+`--flat-price` is valid only with `--tariff flat`; finite negative flat prices are supported.
+`--include-schedule` is valid only with `--format json`. Text cost and saving values are in
+currency units, health is a score from 0 to 100, and schedules are grid-side kW values with one
+entry per `timestep_minutes` interval.
+
+Machine-readable output is available without exposing internal schema objects:
+
+```bash
+evmenu generate ... --format json
+```
+
+Schedules are omitted from JSON by default to keep output compact. Add `--include-schedule` to
+include `charging_schedule_kw`, the grid-side power for each interval of `timestep_minutes`.
+JSON numbers retain the unrounded service values; the text table rounds only for display.
+
+Other commands:
+
+```bash
+evmenu models
+evmenu tariffs
+```
+
+`evmenu models` reports each model's capacity, charger power, chemistry, consumption, and
+illustrative-assumption note. `evmenu tariffs` reports the illustrative research TOU period
+boundaries and prices plus the caller-configurable flat tariff. Neither command makes a
+manufacturer, official, current, or regulated-price claim. Domain and physical errors are printed
+to standard error and return exit status 2. Argument syntax errors use the same exit status.
+
+Commit 9 does not add configuration-file input, manufacturer-verified data, live tariff retrieval,
+customer-choice modelling, Monte Carlo realization, multi-day coupling, fleet/network simulation,
+plotting, or reporting.
