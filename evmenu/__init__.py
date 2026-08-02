@@ -7,6 +7,7 @@ from .assembly import (
     assemble_customer_menu,
     prune_ready_step_change_points,
 )
+from .catalog import EVModel, get_ev_model, list_ev_models, search_ev_models
 from .degradation import (
     DEFAULT_LFP_PARAMETERS,
     DEFAULT_NMC_PARAMETERS,
@@ -68,6 +69,7 @@ from .schemas import (
     TargetOption,
     TargetSource,
 )
+from .service import CustomerMenuRow, GeneratedCustomerMenu, TariffName, generate_ev_menu
 from .validation import (
     ValidationCode,
     ValidationIssue,
@@ -86,13 +88,16 @@ __all__ = [
     "Chemistry",
     "ChemistryDegradationParameters",
     "ConstructedProfile",
+    "CustomerMenuRow",
     "DegradationAssessment",
     "DegradationScoredMenu",
     "DegradationSettings",
     "EVMenuError",
+    "EVModel",
     "EVSpec",
     "EndpointRole",
     "FrontierSettings",
+    "GeneratedCustomerMenu",
     "GeneratedMenu",
     "MenuAssemblySettings",
     "MenuCandidate",
@@ -109,6 +114,7 @@ __all__ = [
     "SignalValidationError",
     "TargetOption",
     "TargetSource",
+    "TariffName",
     "ValidationCode",
     "ValidationIssue",
     "ValidationReport",
@@ -127,11 +133,15 @@ __all__ = [
     "delivered_target_energy_kwh",
     "evaluate_request_feasibility",
     "generate_candidate_menu",
+    "generate_ev_menu",
+    "get_ev_model",
+    "list_ev_models",
     "minimum_required_departure_energy_kwh",
     "minimum_required_target_soc",
     "prune_ready_step_change_points",
     "request_is_feasible",
     "required_grid_energy_kwh",
     "score_generated_menu",
+    "search_ev_models",
     "validate_charging_profile",
 ]

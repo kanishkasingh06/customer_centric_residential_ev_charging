@@ -93,12 +93,43 @@ def _verify_allocation(
         )
 
 
+def _normalize_battery_energy(
+    *,
+    ev: EVSpec,
+    battery_energy: list[float],
+    tolerances: ValidationTolerances,
+) -> tuple[float, ...]:
+    """Normalize machine-scale battery-boundary noise before schema construction."""
+    boundary_energy_tolerance = min(
+        tolerances.energy_kwh,
+        tolerances.soc * ev.battery_capacity_kwh,
+    )
+    normalized: list[float] = []
+    for index, energy in enumerate(battery_energy):
+        if energy < -boundary_energy_tolerance:
+            raise PhysicalConstraintError(
+                f"battery energy is materially below zero at state {index}."
+            )
+        if energy > ev.battery_capacity_kwh + boundary_energy_tolerance:
+            raise PhysicalConstraintError(
+                f"battery energy materially exceeds capacity at state {index}."
+            )
+        if energy < 0.0:
+            normalized.append(0.0)
+        elif energy > ev.battery_capacity_kwh:
+            normalized.append(ev.battery_capacity_kwh)
+        else:
+            normalized.append(energy)
+    return tuple(normalized)
+
+
 def _build_profile_from_grid_energy(
     *,
     ev: EVSpec,
     session: ChargingSession,
     signal: PlanningSignal,
     grid_energy_kwh: list[float],
+    tolerances: ValidationTolerances,
 ) -> ChargingProfile:
     """Build exact battery and SOC states from a grid-energy allocation."""
     expected_intervals = session.departure_step - session.arrival_step
@@ -109,12 +140,21 @@ def _build_profile_from_grid_energy(
     battery_energy = [session.initial_energy_kwh]
     for energy in grid_energy_kwh:
         battery_energy.append(battery_energy[-1] + ev.charging_efficiency * energy)
-    soc = tuple(energy / ev.battery_capacity_kwh for energy in battery_energy)
+
+    # Normalize only machine-scale boundary noise before constructing the
+    # immutable profile.  The helper derives SOC from these cleaned energies,
+    # preserving exact energy/SOC consistency.
+    cleaned_battery_energy = _normalize_battery_energy(
+        ev=ev,
+        battery_energy=battery_energy,
+        tolerances=tolerances,
+    )
+    soc = tuple(energy / ev.battery_capacity_kwh for energy in cleaned_battery_energy)
 
     return ChargingProfile(
         start_step=session.arrival_step,
         grid_energy_kwh=tuple(grid_energy_kwh),
-        battery_energy_kwh=tuple(battery_energy),
+        battery_energy_kwh=cleaned_battery_energy,
         power_kw=power_kw,
         soc=soc,
     )
@@ -215,6 +255,7 @@ def build_immediate_charging_profile(
         session=session,
         signal=signal,
         grid_energy_kwh=allocation,
+        tolerances=validation_tolerances,
     )
     return _validated_result(
         ev=ev,
@@ -284,6 +325,7 @@ def build_minimum_cost_charging_profile(
         session=session,
         signal=signal,
         grid_energy_kwh=allocation,
+        tolerances=validation_tolerances,
     )
     return _validated_result(
         ev=ev,

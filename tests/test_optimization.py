@@ -62,6 +62,100 @@ def _candidate() -> tuple[MenuCandidate, float]:
     return candidate, candidate.same_target_bau_cost
 
 
+def _service_like_context(
+    *, ev: EVSpec, session: ChargingSession, target_soc: float = 0.8, ready_step: int = 17
+) -> tuple[EVSpec, ChargingSession, PlanningSignal, MenuCandidate]:
+    prices = tuple(
+        4.0
+        if (19 * 60 + step * 15) % 1440 < 6 * 60
+        else 7.0
+        if (19 * 60 + step * 15) % 1440 < 17 * 60
+        else 10.0
+        if (19 * 60 + step * 15) % 1440 < 23 * 60
+        else 5.0
+        for step in range(session.departure_step - session.arrival_step)
+    )
+    signal = PlanningSignal(
+        timestep_hours=0.25,
+        price_per_kwh=prices,
+        battery_temperature_c=(30.0,) * len(prices),
+    )
+    menu = generate_candidate_menu(ev=ev, session=session, signal=signal)
+    candidate = next(
+        item
+        for item in menu.candidates
+        if item.kind == "minimum_cost"
+        and item.target_soc == target_soc
+        and item.ready_step == ready_step
+    )
+    return ev, session, signal, candidate
+
+
+def test_generic_60_nmc_former_service_failure_is_fixed() -> None:
+    ev, session, signal, candidate = _service_like_context(
+        ev=EVSpec(
+            ev_id="generic_60kwh_nmc",
+            battery_capacity_kwh=60.0,
+            minimum_energy_kwh=3.0,
+            charger_power_kw=7.2,
+            charging_efficiency=0.9,
+            chemistry="NMC",
+        ),
+        session=ChargingSession(
+            arrival_step=0,
+            departure_step=48,
+            initial_energy_kwh=21.0,
+            commute_energy_kwh=7.65,
+            buffer_energy_kwh=6.0,
+        ),
+    )
+    frontier = build_sandwich_saving_frontier(
+        ev=ev,
+        session=session,
+        signal=signal,
+        candidate=candidate,
+        bau_cost=candidate.same_target_bau_cost,
+    )
+    assert all(
+        right.trajectory_objective + 1e-8 >= left.trajectory_objective
+        for left, right in zip(frontier.points, frontier.points[1:], strict=False)
+    )
+
+
+def test_generic_40_soc_half_endpoint_is_clamped_without_relaxing_validation() -> None:
+    ev, session, signal, candidate = _service_like_context(
+        ev=EVSpec(
+            ev_id="generic_40kwh_lfp",
+            battery_capacity_kwh=40.0,
+            minimum_energy_kwh=2.0,
+            charger_power_kw=7.2,
+            charging_efficiency=0.9,
+            chemistry="LFP",
+        ),
+        session=ChargingSession(
+            arrival_step=0,
+            departure_step=48,
+            initial_energy_kwh=20.0,
+            commute_energy_kwh=0.0,
+            buffer_energy_kwh=4.0,
+        ),
+        target_soc=1.0,
+        ready_step=29,
+    )
+    frontier = build_sandwich_saving_frontier(
+        ev=ev,
+        session=session,
+        signal=signal,
+        candidate=candidate,
+        bau_cost=candidate.same_target_bau_cost,
+    )
+    assert frontier.points
+    assert all(point.constructed.validation.is_valid for point in frontier.points)
+    assert all(
+        0.0 <= soc <= 1.0 for point in frontier.points for soc in point.constructed.profile.soc
+    )
+
+
 def test_frontier_settings_validation() -> None:
     with pytest.raises(PhysicalConstraintError):
         FrontierSettings(maximum_levels=1)

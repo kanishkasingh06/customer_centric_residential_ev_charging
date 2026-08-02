@@ -4,6 +4,7 @@ import math
 
 import pytest
 
+import evmenu.profiles as profiles_module
 from evmenu import (
     ChargingProfile,
     ChargingSession,
@@ -41,6 +42,47 @@ def test_immediate_exact_one_interval() -> None:
     assert result.ready_step == 1
     assert result.validation.is_valid
     assert result.charging_cost == 20.0
+
+
+def test_machine_scale_upper_boundary_is_normalized_consistently() -> None:
+    result = profiles_module._build_profile_from_grid_energy(
+        ev=ev(power=20.0),
+        session=ChargingSession(0, 1, 20.0, 0.0, 0.0),
+        signal=signal((1.0,)),
+        grid_energy_kwh=[20.000000000000004],
+        tolerances=ValidationTolerances(),
+    )
+
+    assert result.battery_energy_kwh == (20.0, 40.0)
+    assert result.soc == (0.5, 1.0)
+    assert all(
+        abs(energy - soc * 40.0) <= ValidationTolerances().energy_kwh
+        for energy, soc in zip(result.battery_energy_kwh, result.soc, strict=True)
+    )
+    assert (
+        abs(result.battery_energy_kwh[1] - (result.battery_energy_kwh[0] + 20.000000000000004))
+        <= ValidationTolerances().energy_kwh
+    )
+
+
+def test_machine_scale_lower_boundary_is_normalized() -> None:
+    normalized = profiles_module._normalize_battery_energy(
+        ev=ev(),
+        battery_energy=[-1e-16, 20.0],
+        tolerances=ValidationTolerances(),
+    )
+
+    assert normalized == (0.0, 20.0)
+
+
+@pytest.mark.parametrize("energy", [40.0 + 40.0 * 1e-5, -40.0 * 1e-5])
+def test_material_battery_boundary_violation_is_rejected(energy: float) -> None:
+    with pytest.raises(PhysicalConstraintError):
+        profiles_module._normalize_battery_energy(
+            ev=ev(),
+            battery_energy=[energy],
+            tolerances=ValidationTolerances(),
+        )
 
 
 def test_immediate_applies_efficiency_once() -> None:

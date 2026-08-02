@@ -381,11 +381,18 @@ def _profile_from_energy(
     session: ChargingSession,
     signal: PlanningSignal,
     energy: list[float],
+    *,
+    energy_tolerance: float = 0.0,
 ) -> ChargingProfile:
     power = tuple(value / signal.timestep_hours for value in energy)
     battery = [session.initial_energy_kwh]
     for value in energy:
-        battery.append(battery[-1] + ev.charging_efficiency * value)
+        next_energy = battery[-1] + ev.charging_efficiency * value
+        if abs(next_energy - ev.battery_capacity_kwh) <= energy_tolerance:
+            next_energy = ev.battery_capacity_kwh
+        elif abs(next_energy - ev.minimum_energy_kwh) <= energy_tolerance:
+            next_energy = ev.minimum_energy_kwh
+        battery.append(next_energy)
     return ChargingProfile(
         start_step=session.arrival_step,
         grid_energy_kwh=tuple(energy),
@@ -901,7 +908,13 @@ def _solve(
         raise PhysicalConstraintError(
             "optimized profile does not deliver the required grid energy."
         )
-    profile = _profile_from_energy(ev, session, signal, full_energy)
+    profile = _profile_from_energy(
+        ev,
+        session,
+        signal,
+        full_energy,
+        energy_tolerance=max(tolerances.energy_kwh, frontier_settings.energy_tolerance),
+    )
     report = validate_charging_profile(
         ev=ev,
         session=session,
@@ -1086,16 +1099,22 @@ def build_sandwich_saving_frontier(
         frontier_settings=settings,
         tolerances=validation,
     )
-    if _same_point(least, maximum):
+    endpoint_tolerance = max(
+        settings.saving_band,
+        settings.saving_tolerance,
+        settings.cost_tolerance,
+    )
+    if _same_point(least, maximum) or abs(least.saving - maximum.saving) <= endpoint_tolerance:
+        endpoint = maximum
         collapsed = _make_optimized_profile(
             ev=ev,
             session=session,
             signal=signal,
             candidate=candidate,
             bau_cost=numeric_bau_cost,
-            profile=least.constructed.profile,
-            required=least.constructed.required_grid_energy_kwh,
-            validation=least.constructed.validation,
+            profile=endpoint.constructed.profile,
+            required=endpoint.constructed.required_grid_energy_kwh,
+            validation=endpoint.constructed.validation,
             degradation_settings=model,
             frontier_settings=settings,
             requested_saving=None,

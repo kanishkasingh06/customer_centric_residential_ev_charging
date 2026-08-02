@@ -118,3 +118,51 @@ Commit 7 does not add customer-choice modelling, preference estimation,
 stochastic realization, Monte Carlo, multi-day state coupling, fleet
 aggregation, network simulation, plotting, reporting, file I/O, or experiment
 scripts.
+
+# Commit 8 — High-level single-EV menu generation
+
+Commit 8 adds a user-facing service that converts an EV model, local arrival and
+departure times, current SOC, and next-trip distance into the validated Commit
+1–7 pipeline. Callers no longer need to construct `EVSpec`, `ChargingSession`,
+`PlanningSignal`, or invoke the candidate and assembly layers manually.
+
+```python
+from evmenu import generate_ev_menu
+
+menu = generate_ev_menu(
+    ev_model="generic_40kwh_lfp",
+    arrival_time="19:00",
+    departure_time="07:00",
+    current_soc=0.35,
+    next_trip_distance_km=45.0,
+)
+```
+
+The service uses a 15-minute grid by default and supports one overnight window.
+Clock strings are strict five-character `HH:MM` values: whitespace, one-digit
+fields, and invalid 24-hour values are rejected. Equal arrival/departure clock
+times are rejected as ambiguous. Arrival and departure must align to the
+selected timestep. Current SOC is fractional (`0.35` means 35%) and is converted to
+battery energy, next-trip distance is converted using the selected model's
+consumption assumption, and the default buffer is 10% of usable battery
+capacity.
+
+The built-in `research_tou` price schedule and generic EV catalogue entries are
+**illustrative research assumptions**, not manufacturer specifications or a
+regulated retail tariff. Deployment code should pass a custom `EVModel` with
+verified values. Model lookup is case-sensitive and trims surrounding whitespace;
+model search is case-insensitive, trims surrounding whitespace, and rejects empty
+queries. A flat tariff is also supported,
+including finite negative prices because the underlying research signal permits
+them. The returned
+`GeneratedCustomerMenu` retains the complete `AssembledMenu` for auditability
+and exposes aligned `CustomerMenuRow` objects containing ready time, target SOC,
+cost, saving, health, energy drawn, source role, and the full charging schedule.
+`charging_schedule_kw` is grid-side charging power for each interval, whose
+duration is given by `timestep_minutes`. Roles are `bau`, `least_degradation`,
+`intermediate`, `maximum_saving`, and `least_and_maximum`.
+
+Commit 8 does not add a CLI, external configuration files, manufacturer-data
+scraping, customer-choice modelling, Monte Carlo realization, multi-day state
+coupling, fleet/network simulation, plotting, or report generation.
+Dates, time zones, and sessions longer than one overnight cycle are deferred.
