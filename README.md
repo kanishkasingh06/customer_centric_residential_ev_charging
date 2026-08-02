@@ -1,78 +1,91 @@
-# Daily EV Menu — Commit 3
+# Daily EV Menu — Commit 4
 
-Commit 3 builds on the immutable Commit 1 schemas and Commit 2 feasibility and
-validation contracts. It adds only deterministic, analytical charging-profile
-construction; it does not add menu generation or customer-choice logic.
+Commit 4 adds deterministic pre-degradation candidate-menu generation on top
+of the validated schemas, feasibility equations, physical validator, and
+analytical profile constructors from Commits 1–3.
 
-## Conventions
+## Candidate-menu flow
 
-- `PlanningSignal` is an arbitrary contiguous horizon. Step `0` is its first
-  represented interval, not necessarily midnight, and it must cover the full
-  session window.
-- Charging sessions use the half-open interval
-  `[arrival_step, departure_step)`.
-- Every constructed profile follows the exact-session convention. If
-  `N = departure_step - arrival_step`, then power and grid-energy vectors have
-  `N` entries and battery-energy and SOC vectors have `N + 1` boundary states.
-  Local interval `k` maps to global step `session.arrival_step + k`.
-- Charging is allowed only before `ready_step`; all intervals from
-  `ready_step` through departure remain in the profile with zero power.
-- Grid energy is `power_kw * timestep_hours`, and battery energy increases by
-  `charging_efficiency * grid_energy_kwh`.
-- `battery_capacity_kwh` is usable battery-side capacity (`B_max`), while
-  `minimum_energy_kwh` is the battery floor (`B_min`).
+For each EV/session, the generator uses target options from Commit 2's
+feasibility layer and:
 
-## Commit 3 profile constructors
+1. constructs the personalized commute-plus-buffer target and valid 80%, 90%,
+   and 100% standard targets;
+2. constructs exactly one immediate same-target charging profile as the BAU
+   reference for every target;
+3. enumerates every exactly feasible ready boundary;
+4. constructs the analytical minimum-cost profile for each feasible request;
+5. calculates same-target saving
+   `S = C_BAU(target) - C_candidate`;
+6. independently validates every trajectory; and
+7. applies exact deterministic deduplication to minimum-cost candidates.
 
-`build_immediate_charging_profile` allocates the exact required grid energy
-chronologically from arrival, filling each interval up to charger capacity and
-using a partial final interval when needed. Its ready step is the boundary at
-which the target is reached. A no-charge request returns a full-session
-zero-power profile ready at arrival.
+The public entry point is:
 
-`build_minimum_cost_charging_profile` solves the analytical linear allocation
-problem before a requested ready step. It fills intervals in ascending
-`(price_per_kwh, global_step)` order, so equal-price ties deterministically use
-the earlier interval. Negative prices are supported, but the target remains
-exact: the constructors never charge beyond the required energy merely to earn
-revenue.
-
-Both constructors support partial intervals and return a frozen
-`ConstructedProfile` containing:
-
-- the complete exact-session `ChargingProfile`;
-- target SOC and ready-step metadata;
-- required grid energy;
-- charging cost;
-- the independent Commit 2 `ValidationReport`.
-
-Cost is calculated on grid energy using global signal indices:
-
-```text
-C = sum(price[global_step] * E_grid[local_step])
+```python
+menu = generate_candidate_menu(
+    ev=ev,
+    session=session,
+    signal=signal,
+)
 ```
 
-Every internally constructed profile is passed through the independent Commit
-2 validator before being returned. A failed validation raises
-`PhysicalConstraintError`; an invalid profile is never returned as successful.
-`ConstructedProfile` is intended to be created by the public constructors;
-direct manual dataclass construction does not itself perform physical
-validation.
+It returns a frozen `GeneratedMenu` containing frozen `MenuCandidate` objects.
+Each candidate stores target provenance, ready step, charging cost, its
+same-target BAU cost, saving, required grid energy, the full-session profile,
+and an independent validation report.
 
-The optional `compute_buffer_energy(...)` helper is preprocessing for
-constructing a `ChargingSession`. Once created, `session.buffer_energy_kwh` is
-finalized data and is consumed directly by feasibility and validation.
+## Candidate semantics
 
-## Deferred to Commit 4
+- BAU is always included. Every target has exactly one `immediate_bau`
+  candidate, with `saving == 0.0` and
+  `same_target_bau_cost == charging_cost`. The BAU reference is never removed,
+  even when a minimum-cost profile is physically identical.
+- Minimum-cost schedules use ascending `(price, global_step)` order and are
+  considered at every exactly feasible ready boundary.
+- Savings are always measured against immediate charging to the **same target**.
+  A negative saving is valid and is retained exactly: it means an earlier or
+  otherwise tighter ready promise costs more than the full-session BAU
+  reference. Non-finite savings are rejected; savings are never clipped to
+  zero.
+- Negative prices are supported, but charging remains target-exact; candidates
+  never overcharge to earn revenue.
+- A profile spans the complete session `[arrival_step, departure_step)`.
 
-The following are intentionally not implemented:
+## Exact deduplication and ordering
 
-- menu generation, Pareto filtering, and intermediate saving levels;
-- battery degradation or degradation-aware profiles;
+By default, only `minimum_cost` candidates within one target are deduplicated.
+Two such candidates are duplicates only when exact equality holds for target
+SOC, target provenance, candidate type, every profile vector
+(`grid_energy_kwh`, `power_kw`, `battery_energy_kwh`, and `soc`), charging cost,
+and saving. No tolerance-based profile matching is used. This exact rule is
+deliberate because the Commit 3 constructors are deterministic. When repeated
+minimum-cost requests produce the same key, ready steps are enumerated in
+ascending order, so the earliest customer promise is retained.
+
+Candidates are sorted after deduplication by:
+
+1. target SOC ascending;
+2. ready step ascending;
+3. candidate type, with `immediate_bau` before `minimum_cost`;
+4. charging cost ascending; and
+5. candidate ID ascending.
+
+Candidate IDs are deterministic, contain no Python hash or memory address, and
+distinguish target, candidate type, and ready step where needed.
+
+## Deferred
+
+The following remain intentionally outside Commit 4:
+
+- literature-based battery degradation;
+- health scoring and degradation-aware/intermediate-saving profile
+  construction;
+- final Pareto filtering and display-cap selection;
 - customer-choice modelling;
 - Monte Carlo simulation;
-- distribution-network simulation;
-- plotting, file loading, or experiment scripts.
+- distribution-network simulation; and
+- plotting and file I/O.
 
 ## Run checks
 

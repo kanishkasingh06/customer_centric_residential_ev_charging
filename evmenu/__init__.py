@@ -18,6 +18,13 @@ from .feasibility import (
     request_is_feasible,
     required_grid_energy_kwh,
 )
+from .menu import (
+    CandidateKind,
+    GeneratedMenu,
+    MenuCandidate,
+    MenuGenerationSettings,
+    generate_candidate_menu,
+)
 from .profiles import (
     ConstructedProfile,
     build_immediate_charging_profile,
@@ -34,14 +41,25 @@ from .schemas import (
     TargetOption,
     TargetSource,
 )
+from .validation import (
+    ValidationCode,
+    ValidationIssue,
+    ValidationReport,
+    ValidationTolerances,
+    validate_charging_profile,
+)
 
 __all__ = [
+    "CandidateKind",
     "ChargingProfile",
     "ChargingSession",
     "Chemistry",
     "ConstructedProfile",
     "EVMenuError",
     "EVSpec",
+    "GeneratedMenu",
+    "MenuCandidate",
+    "MenuGenerationSettings",
     "MenuOffer",
     "MenuSettings",
     "PhysicalConstraintError",
@@ -62,17 +80,10 @@ __all__ = [
     "compute_buffer_energy",
     "delivered_target_energy_kwh",
     "evaluate_request_feasibility",
+    "generate_candidate_menu",
     "minimum_required_departure_energy_kwh",
     "minimum_required_target_soc",
     "request_is_feasible",
     "required_grid_energy_kwh",
     "validate_charging_profile",
 ]
-
-from .validation import (
-    ValidationCode,
-    ValidationIssue,
-    ValidationReport,
-    ValidationTolerances,
-    validate_charging_profile,
-)
