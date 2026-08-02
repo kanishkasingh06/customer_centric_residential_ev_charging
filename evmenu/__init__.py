@@ -1,5 +1,16 @@
 """Residential EV customer-menu package."""
 
+from .degradation import (
+    DEFAULT_LFP_PARAMETERS,
+    DEFAULT_NMC_PARAMETERS,
+    ChemistryDegradationParameters,
+    DegradationAssessment,
+    DegradationScoredMenu,
+    DegradationSettings,
+    assess_candidate_degradation,
+    calendar_soc_stress,
+    score_generated_menu,
+)
 from .exceptions import (
     EVMenuError,
     PhysicalConstraintError,
@@ -50,11 +61,17 @@ from .validation import (
 )
 
 __all__ = [
+    "DEFAULT_LFP_PARAMETERS",
+    "DEFAULT_NMC_PARAMETERS",
     "CandidateKind",
     "ChargingProfile",
     "ChargingSession",
     "Chemistry",
+    "ChemistryDegradationParameters",
     "ConstructedProfile",
+    "DegradationAssessment",
+    "DegradationScoredMenu",
+    "DegradationSettings",
     "EVMenuError",
     "EVSpec",
     "GeneratedMenu",
@@ -73,10 +90,12 @@ __all__ = [
     "ValidationIssue",
     "ValidationReport",
     "ValidationTolerances",
+    "assess_candidate_degradation",
     "available_grid_energy_kwh",
     "build_immediate_charging_profile",
     "build_minimum_cost_charging_profile",
     "build_target_options",
+    "calendar_soc_stress",
     "compute_buffer_energy",
     "delivered_target_energy_kwh",
     "evaluate_request_feasibility",
@@ -85,5 +104,6 @@ __all__ = [
     "minimum_required_target_soc",
     "request_is_feasible",
     "required_grid_energy_kwh",
+    "score_generated_menu",
     "validate_charging_profile",
 ]

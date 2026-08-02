@@ -1,99 +1,129 @@
-# Daily EV Menu — Commit 4
+# Daily EV Menu — Commit 5
 
-Commit 4 adds deterministic pre-degradation candidate-menu generation on top
-of the validated schemas, feasibility equations, physical validator, and
-analytical profile constructors from Commits 1–3.
+Commit 5 annotates the existing Commit 4 candidate menu with chemistry-aware,
+additive degradation assessments and a deterministic relative health score. It
+does not construct new charging trajectories or remove existing candidates.
 
-## Candidate-menu flow
+## Degradation units and model
 
-For each EV/session, the generator uses target options from Commit 2's
-feasibility layer and:
+Every fade value is a fraction of usable battery capacity: `0.01` means 1%
+capacity fade. For each existing candidate:
 
-1. constructs the personalized commute-plus-buffer target and valid 80%, 90%,
-   and 100% standard targets;
-2. constructs exactly one immediate same-target charging profile as the BAU
-   reference for every target;
-3. enumerates every exactly feasible ready boundary;
-4. constructs the analytical minimum-cost profile for each feasible request;
-5. calculates same-target saving
-   `S = C_BAU(target) - C_candidate`;
-6. independently validates every trajectory; and
-7. applies exact deterministic deduplication to minimum-cost candidates.
+```text
+total_fade = window_calendar_fade + parked_day_fade + cycle_fade
+```
 
-The public entry point is:
+Calendar SOC stress is chemistry-specific:
+
+```text
+g(s) = a0 + a1*s + a2*max(s - s_knee, 0)^2
+```
+
+LFP and NMC parameters are separate, immutable, case-sensitive parameter sets.
+The defaults reproduce representative 30°C, one-year calendar anchors:
+
+- LFP: 1.00%/year at 50% SOC and 1.24%/year at 100% SOC;
+- NMC: 1.78%, 2.41%, and 3.02%/year at 50%, 80%, and 100% SOC.
+
+These are representative calibrated scenario defaults, not publication-grade
+cell-specific fitted coefficients.
+
+Calendar temperature scaling uses Celsius inputs converted once to Kelvin and
+the Arrhenius expression. Calendar age uses the local time-power-law slope
+relative to a one-year reference age. Age is measured in years.
+
+The charging-window term samples exactly the beginning-of-interval SOC states
+(`profile.soc[:-1]`) for the `N` session intervals. The terminal state is not
+counted as an additional interval. The parked-day temperature proxy is the
+final in-session signal temperature at `session.departure_step - 1`.
+
+Parked SOC is calculated as:
+
+```text
+parked_energy = max(target_soc * B_max, initial_energy) - commute_energy
+parked_soc = parked_energy / B_max
+```
+
+Commute energy is battery-side, charging efficiency is not applied to it, and
+buffer energy is not subtracted again. Values outside `[0, 1]` are rejected;
+they are never silently clipped.
+
+Cycle fade uses battery-side session throughput, depth fraction, and battery-
+side peak C-rate:
+
+```text
+throughput = eta * sum(grid_energy)
+peak_c_rate = eta * max(grid_power) / B_max
+```
+
+C-rate has units of `h^-1`, conventionally written as C. Zero cumulative FEC is
+allowed. The local cycle-age slope uses a configurable positive
+`minimum_reference_fec` regularization so a new battery remains finite; zero
+throughput still produces zero cycle fade.
+
+Annualized degradation is scenario-based:
+
+```text
+annualized_degradation_pct = total_fade * equivalent_sessions_per_year * 100
+```
+
+The default is 300 equivalent service sessions per year. Each assessment
+represents one charging window, the configured parked-day dwell, and one cycle
+contribution. Parked fade is included once per equivalent session. This is not
+an absolute laboratory life prediction.
+
+## Health score
+
+For one EV/session, all generated candidates are normalized together:
+
+```text
+spread = max_fade - min_fade
+normalized = (fade - min_fade) / spread
+raw_health = 100 * (1 - normalized)
+```
+
+If `spread` is at or below `degradation_comparison_tolerance`, every candidate
+receives 100. Otherwise scores are quantized with explicit half-up rounding:
+
+```text
+quantized = resolution * floor(raw_health / resolution + 0.5)
+```
+
+A tiny floating-point epsilon is used at exact boundaries, then scores are
+clamped to `[0, 100]`. The default resolution is 5 points. Health is a
+within-menu relative score, not absolute state of health, remaining battery
+life, or a cross-EV comparison metric.
+
+## Public workflow
 
 ```python
-menu = generate_candidate_menu(
+candidate_menu = generate_candidate_menu(
     ev=ev,
     session=session,
     signal=signal,
 )
+
+scored_menu = score_generated_menu(
+    ev=ev,
+    session=session,
+    signal=signal,
+    menu=candidate_menu,
+)
 ```
 
-It returns a frozen `GeneratedMenu` containing frozen `MenuCandidate` objects.
-Each candidate stores target provenance, ready step, charging cost, its
-same-target BAU cost, saving, required grid energy, the full-session profile,
-and an independent validation report.
+`scored_menu.offers` preserves candidate count, order, IDs, candidate metadata,
+costs, savings, profiles, and validation reports. Every offer has one matching
+immutable degradation assessment.
 
-## Candidate semantics
+## Still deferred to Commit 6
 
-- BAU is always included. Every target has exactly one `immediate_bau`
-  candidate, with `saving == 0.0` and
-  `same_target_bau_cost == charging_cost`. The BAU reference is never removed,
-  even when a minimum-cost profile is physically identical.
-- Minimum-cost schedules use ascending `(price, global_step)` order and are
-  considered at every exactly feasible ready boundary.
-- Savings are always measured against immediate charging to the **same target**.
-  A negative saving is valid and is retained exactly: it means an earlier or
-  otherwise tighter ready promise costs more than the full-session BAU
-  reference. Non-finite savings are rejected; savings are never clipped to
-  zero.
-- Negative prices are supported, but charging remains target-exact; candidates
-  never overcharge to earn revenue.
-- A profile spans the complete session `[arrival_step, departure_step)`.
-
-## Exact deduplication and ordering
-
-By default, only `minimum_cost` candidates within one target are deduplicated.
-Two such candidates are duplicates only when exact equality holds for target
-SOC, target provenance, candidate type, every profile vector
-(`grid_energy_kwh`, `power_kw`, `battery_energy_kwh`, and `soc`), charging cost,
-and saving. No tolerance-based profile matching is used. This exact rule is
-deliberate because the Commit 3 constructors are deterministic. When repeated
-minimum-cost requests produce the same key, ready steps are enumerated in
-ascending order, so the earliest customer promise is retained.
-
-Candidates are sorted after deduplication by:
-
-1. target SOC ascending;
-2. ready step ascending;
-3. candidate type, with `immediate_bau` before `minimum_cost`;
-4. charging cost ascending; and
-5. candidate ID ascending.
-
-Candidate IDs are deterministic, contain no Python hash or memory address, and
-distinguish target, candidate type, and ready step where needed.
-
-## Deferred
-
-The following remain intentionally outside Commit 4:
-
-- literature-based battery degradation;
-- health scoring and degradation-aware/intermediate-saving profile
-  construction;
-- final Pareto filtering and display-cap selection;
+- least-degradation trajectory optimization;
+- intermediate saving-health profiles;
+- anchored saving levels;
+- Pareto filtering;
+- display caps;
 - customer-choice modelling;
 - Monte Carlo simulation;
-- distribution-network simulation; and
-- plotting and file I/O.
-
-## Run checks
-
-```bash
-python -m pip install -e ".[dev]"
-python -m pytest -q
-python -m pytest --cov=evmenu --cov-report=term-missing
-ruff check .
-ruff format --check .
-mypy evmenu tests
-```
+- distribution-network simulation;
+- plotting; and
+- file I/O.
