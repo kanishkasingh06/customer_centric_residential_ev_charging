@@ -7,7 +7,9 @@ name = "daily-ev-menu"
 version = "0.1.0"
 description = "Residential EV customer-menu generator"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "scipy>=1.11",
+]
 
 [project.optional-dependencies]
 dev = [
