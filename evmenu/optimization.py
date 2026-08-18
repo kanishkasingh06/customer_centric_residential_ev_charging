@@ -17,6 +17,8 @@ from typing import Literal, cast
 from scipy.optimize import minimize  # type: ignore[import-untyped]
 
 from .degradation import (
+    LFP_DEGRADATION_MODEL_ID,
+    NMC_DEGRADATION_MODEL_ID,
     DegradationAssessment,
     DegradationSettings,
     assess_candidate_degradation,
@@ -33,10 +35,19 @@ _HOURS_PER_YEAR = 8760.0
 _GAS_CONSTANT = 8.314462618
 _DEFAULT_OBJECTIVE_SCALE = 1_000_000.0
 EndpointRole = Literal[
+    "low_saving",
     "least_degradation",
     "intermediate",
     "maximum_saving",
     "least_and_maximum",
+]
+FailureReason = Literal[
+    "infeasible_band",
+    "solver_failure",
+    "validation_failure",
+    "duplicate",
+    "nonpositive_actual_saving",
+    "numerical_endpoint",
 ]
 
 
@@ -53,6 +64,61 @@ def _canonical_decimal(value: float) -> str:
         raise SchemaValidationError("requested saving cannot be represented canonically.") from exc
     text = format(decimal, "f")
     return "0" if text in ("-0", "0.0") else text
+
+
+def select_saving_levels(
+    *,
+    maximum_saving: float,
+    saving_step: float,
+    maximum_levels: int,
+    zero_tolerance: float,
+) -> tuple[float, ...]:
+    """Return deterministic value-spaced positive saving targets.
+
+    Raw levels are ``step, 2*step, ...`` plus the exact maximum endpoint.
+    If there are more than ``maximum_levels`` values, evenly spaced indices
+    over the complete raw sequence are retained, with the first and last
+    indices always protected.  Thus low, intermediate, and maximum regions
+    survive deterministic Kmax reduction (for example 5, 15, 30, 40).
+    """
+    maximum = _finite("maximum_saving", maximum_saving)
+    step = _finite("saving_step", saving_step)
+    zero = _finite("zero_tolerance", zero_tolerance)
+    if step <= 0.0:
+        raise PhysicalConstraintError("saving_step must be positive.")
+    if zero < 0.0:
+        raise PhysicalConstraintError("zero_tolerance must be non-negative.")
+    if isinstance(maximum_levels, bool) or not isinstance(maximum_levels, int):
+        raise SchemaValidationError("maximum_levels must be an integer.")
+    if maximum_levels < 1:
+        raise PhysicalConstraintError("maximum_levels must be positive.")
+    if maximum <= zero:
+        return ()
+    raw: list[float] = []
+    index = 1
+    while index * step < maximum - zero:
+        raw.append(float(index * step))
+        index += 1
+    raw.append(maximum)
+    deduplicated: list[float] = []
+    for value in raw:
+        if not deduplicated or abs(value - deduplicated[-1]) > zero:
+            deduplicated.append(value)
+        else:
+            deduplicated[-1] = max(deduplicated[-1], value)
+    if len(deduplicated) <= maximum_levels:
+        return tuple(deduplicated)
+    if maximum_levels == 1:
+        return (deduplicated[-1],)
+    last = len(deduplicated) - 1
+    chosen_indices = {round(index * last / (maximum_levels - 1)) for index in range(maximum_levels)}
+    chosen_indices.update((0, last))
+    # Rounding can theoretically collide for tiny Kmax; fill deterministically.
+    if len(chosen_indices) < maximum_levels:
+        chosen_indices.update(
+            index for index in range(last + 1) if len(chosen_indices) < maximum_levels
+        )
+    return tuple(deduplicated[index] for index in sorted(chosen_indices))
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +139,12 @@ class FrontierSettings:
     cost_tolerance: float = 1e-8
     solver_ftol: float | None = None
     solver_max_iterations: int | None = None
+    # Algorithm 1 names.  ``saving_band`` and ``maximum_levels`` remain as
+    # compatibility aliases for Commit 6 callers.
+    saving_step: float = 5.0
+    maximum_saving_levels_per_request: int = 5
+    saving_band_tolerance: float = 0.50
+    saving_zero_tolerance: float = 1e-8
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -86,12 +158,25 @@ class FrontierSettings:
             ("objective_tolerance", self.objective_tolerance),
             ("frontier_gap_tolerance", self.frontier_gap_tolerance),
             ("cost_tolerance", self.cost_tolerance),
+            ("saving_step", self.saving_step),
+            ("saving_band_tolerance", self.saving_band_tolerance),
+            ("saving_zero_tolerance", self.saving_zero_tolerance),
         ):
             _finite(name, value)
         if self.plating_guard_weight < 0.0:
             raise PhysicalConstraintError("plating_guard_weight must be non-negative.")
         if self.saving_band < 0.0:
             raise PhysicalConstraintError("saving_band must be non-negative.")
+        if self.saving_step <= 0.0:
+            raise PhysicalConstraintError("saving_step must be positive.")
+        if self.saving_band_tolerance < 0.0 or self.saving_zero_tolerance < 0.0:
+            raise PhysicalConstraintError("saving tolerances must be non-negative.")
+        if isinstance(self.maximum_saving_levels_per_request, bool) or not isinstance(
+            self.maximum_saving_levels_per_request, int
+        ):
+            raise SchemaValidationError("maximum_saving_levels_per_request must be an integer.")
+        if self.maximum_saving_levels_per_request < 1:
+            raise PhysicalConstraintError("maximum_saving_levels_per_request must be positive.")
         if self.solver_tolerance <= 0.0:
             raise PhysicalConstraintError("solver_tolerance must be positive.")
         if self.objective_scale <= 0.0:
@@ -140,6 +225,19 @@ class FrontierSettings:
             else self.solver_max_iterations
         )
 
+    @property
+    def effective_saving_band(self) -> float:
+        """Return the Algorithm 1 band, honoring the legacy alias."""
+        # A non-default legacy saving_band is an explicit Commit 6 override.
+        return self.saving_band if self.saving_band != 1e-6 else self.saving_band_tolerance
+
+    @property
+    def effective_maximum_levels(self) -> int:
+        """Return the Algorithm 1 Kmax, honoring legacy maximum_levels."""
+        if self.maximum_levels != 5 and self.maximum_saving_levels_per_request == 5:
+            return self.maximum_levels
+        return self.maximum_saving_levels_per_request
+
 
 @dataclass(frozen=True, slots=True)
 class OptimizedProfile:
@@ -169,6 +267,7 @@ class OptimizedProfile:
                 raise SchemaValidationError(f"{name} must be a non-empty string.")
             object.__setattr__(self, name, value.strip())
         if self.endpoint_role not in (
+            "low_saving",
             "least_degradation",
             "intermediate",
             "maximum_saving",
@@ -201,6 +300,111 @@ class OptimizedProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class SavingLevelFailure:
+    """Structured context for a selected saving level that was not retained."""
+
+    ready_step: int
+    target_soc: float
+    requested_saving: float
+    reason: FailureReason
+
+    def __post_init__(self) -> None:
+        if isinstance(self.ready_step, bool) or not isinstance(self.ready_step, int):
+            raise SchemaValidationError("ready_step must be an integer.")
+        if self.ready_step < 0:
+            raise PhysicalConstraintError("ready_step must be non-negative.")
+        _finite("target_soc", self.target_soc)
+        if not 0.0 <= self.target_soc <= 1.0:
+            raise PhysicalConstraintError("target_soc must lie in [0, 1].")
+        _finite("requested_saving", self.requested_saving)
+        if self.requested_saving < 0.0:
+            raise PhysicalConstraintError("requested_saving must be non-negative.")
+        if self.reason not in (
+            "infeasible_band",
+            "solver_failure",
+            "validation_failure",
+            "duplicate",
+            "nonpositive_actual_saving",
+            "numerical_endpoint",
+        ):
+            raise SchemaValidationError("unsupported saving-level failure reason.")
+
+
+@dataclass(frozen=True, slots=True)
+class OptimizationDiagnostics:
+    """Counts of optimizer attempts and classified outcomes."""
+
+    optimization_attempt_count: int = 0
+    optimization_success_count: int = 0
+    optimization_infeasible_count: int = 0
+    optimization_validation_failure_count: int = 0
+    optimization_solver_failure_count: int = 0
+
+    def __post_init__(self) -> None:
+        values = (
+            self.optimization_attempt_count,
+            self.optimization_success_count,
+            self.optimization_infeasible_count,
+            self.optimization_validation_failure_count,
+            self.optimization_solver_failure_count,
+        )
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+            raise SchemaValidationError("optimization diagnostics counts must be integers.")
+        if any(value < 0 for value in values):
+            raise SchemaValidationError("optimization diagnostics counts must be non-negative.")
+        failures = (
+            self.optimization_infeasible_count
+            + self.optimization_validation_failure_count
+            + self.optimization_solver_failure_count
+        )
+        if self.optimization_attempt_count != self.optimization_success_count + failures:
+            raise SchemaValidationError(
+                "optimization diagnostics must satisfy attempts=success+failures."
+            )
+
+    def add(self, other: OptimizationDiagnostics) -> OptimizationDiagnostics:
+        if not isinstance(other, OptimizationDiagnostics):
+            raise SchemaValidationError("other must be OptimizationDiagnostics.")
+        return OptimizationDiagnostics(
+            optimization_attempt_count=self.optimization_attempt_count
+            + other.optimization_attempt_count,
+            optimization_success_count=self.optimization_success_count
+            + other.optimization_success_count,
+            optimization_infeasible_count=self.optimization_infeasible_count
+            + other.optimization_infeasible_count,
+            optimization_validation_failure_count=self.optimization_validation_failure_count
+            + other.optimization_validation_failure_count,
+            optimization_solver_failure_count=self.optimization_solver_failure_count
+            + other.optimization_solver_failure_count,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DegradationObjectiveDiagnostics:
+    """Provenance for the convex trajectory objective used by the solver."""
+
+    reporting_model_id: str
+    optimization_model_id: str
+    exact_reporting_model_used_in_objective: bool
+    objective_convex: bool
+    constant_terms_excluded_from_objective: bool
+
+    def __post_init__(self) -> None:
+        for name in ("reporting_model_id", "optimization_model_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise SchemaValidationError(f"{name} must be a non-empty string.")
+            object.__setattr__(self, name, value.strip())
+        for name in (
+            "exact_reporting_model_used_in_objective",
+            "objective_convex",
+            "constant_terms_excluded_from_objective",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise SchemaValidationError(f"{name} must be bool.")
+
+
+@dataclass(frozen=True, slots=True)
 class SavingFrontier:
     """Ordered anchored saving levels for one fixed ready-step/target request."""
 
@@ -210,6 +414,9 @@ class SavingFrontier:
     bau_cost: float
     points: tuple[OptimizedProfile, ...]
     source_candidate_id: str
+    optimization_diagnostics: OptimizationDiagnostics | None = None
+    level_failures: tuple[SavingLevelFailure, ...] = ()
+    degradation_objective_diagnostics: DegradationObjectiveDiagnostics | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.ev_id, str) or not self.ev_id.strip():
@@ -269,6 +476,23 @@ class SavingFrontier:
             "maximum_saving",
         }.issubset(roles):
             raise SchemaValidationError("frontier must preserve both endpoint roles.")
+        diagnostics = self.optimization_diagnostics
+        if diagnostics is None:
+            diagnostics = OptimizationDiagnostics(
+                optimization_attempt_count=len(points),
+                optimization_success_count=len(points),
+            )
+            object.__setattr__(self, "optimization_diagnostics", diagnostics)
+        elif not isinstance(diagnostics, OptimizationDiagnostics):
+            raise SchemaValidationError("optimization_diagnostics has an invalid type.")
+        failures = tuple(self.level_failures)
+        if any(not isinstance(item, SavingLevelFailure) for item in failures):
+            raise SchemaValidationError("level_failures must contain SavingLevelFailure objects.")
+        object.__setattr__(self, "level_failures", failures)
+        if self.degradation_objective_diagnostics is not None and not isinstance(
+            self.degradation_objective_diagnostics, DegradationObjectiveDiagnostics
+        ):
+            raise SchemaValidationError("invalid degradation objective diagnostics.")
 
 
 def _validate_inputs(
@@ -503,7 +727,7 @@ def _saving_initial_allocation(
     saving_low, saving_high = _saving_interval(
         bau_cost=bau_cost,
         requested_saving=requested_saving,
-        saving_band=settings.saving_band,
+        saving_band=settings.effective_saving_band,
         minimum_saving=minimum_saving,
         maximum_saving=maximum_saving,
     )
@@ -562,7 +786,10 @@ def _objective_value_and_jac(
             * signal.interval_durations[global_index]
             / _HOURS_PER_YEAR
         )
-        soc = states[local_index] / ev.battery_capacity_kwh
+        # Floating-point energy recursion can overshoot a physical endpoint by
+        # a few ulps (notably on 30-minute grids).  Clamp only that numerical
+        # representation before evaluating the bounded stress function.
+        soc = min(1.0, max(0.0, states[local_index] / ev.battery_capacity_kwh))
         stress = calendar_soc_stress(soc, params)
         objective += stress * factor
         weights.append(factor)
@@ -573,7 +800,7 @@ def _objective_value_and_jac(
     jacobian = [0.0] * count
     for variable_index in range(count):
         for state_index in range(variable_index + 1, count):
-            soc = states[state_index] / ev.battery_capacity_kwh
+            soc = min(1.0, max(0.0, states[state_index] / ev.battery_capacity_kwh))
             hinge = max(soc - params.calendar_soc_knee, 0.0)
             stress_derivative = params.calendar_a1 + 2.0 * params.calendar_a2 * hinge
             jacobian[variable_index] += (
@@ -656,7 +883,7 @@ def _validate_solver_vector(
         )
         if (
             abs(realized_saving - requested_saving)
-            > settings.saving_band + settings.saving_tolerance
+            > settings.effective_saving_band + settings.saving_tolerance
         ):
             raise PhysicalConstraintError("solver returned a decision outside the saving band.")
     return normalized
@@ -724,6 +951,10 @@ def _make_optimized_profile(
         point_id = f"{candidate.candidate_id}:maximum-saving"
     elif endpoint_role == "least_and_maximum":
         point_id = f"{candidate.candidate_id}:least-and-maximum"
+    elif endpoint_role == "low_saving":
+        point_id = (
+            f"{candidate.candidate_id}:low-saving:{_canonical_decimal(requested_saving or 0.0)}"
+        )
     elif requested_saving is not None:
         point_id = f"{candidate.candidate_id}:saving:{_canonical_decimal(requested_saving)}"
     else:
@@ -820,7 +1051,7 @@ def _solve(
         ]
         if requested_saving is not None:
             target_cost = bau_cost - requested_saving
-            band = frontier_settings.saving_band
+            band = frontier_settings.effective_saving_band
             constraints.extend(
                 [
                     {
@@ -949,7 +1180,7 @@ def _solve(
     charging_cost = _cost(profile, signal)
     saving = bau_cost - charging_cost
     if requested_saving is not None and abs(saving - requested_saving) > (
-        frontier_settings.saving_band + frontier_settings.saving_tolerance
+        frontier_settings.effective_saving_band + frontier_settings.saving_tolerance
     ):
         raise PhysicalConstraintError("optimized profile violates the requested saving band.")
     return _make_optimized_profile(
@@ -1030,7 +1261,7 @@ def build_saving_constrained_profile(
     _saving_interval(
         bau_cost=numeric_bau_cost,
         requested_saving=target_saving,
-        saving_band=settings.saving_band,
+        saving_band=settings.effective_saving_band,
         minimum_saving=numeric_bau_cost - maximum_cost,
         maximum_saving=numeric_bau_cost - minimum_cost,
     )
@@ -1093,13 +1324,47 @@ def build_sandwich_saving_frontier(
     frontier_settings: FrontierSettings | None = None,
     tolerances: ValidationTolerances | None = None,
 ) -> SavingFrontier:
-    """Build endpoint-anchored midpoint levels on the useful saving branch."""
+    """Build Algorithm 1 value-spaced saving levels for one request.
+
+    Every selected level is solved with the epsilon-constraint saving band;
+    no weighted cost/degradation objective is introduced.  The analytical
+    minimum-cost endpoint is retained as the exact maximum-saving endpoint.
+    """
     model = DegradationSettings() if degradation_settings is None else degradation_settings
     settings = FrontierSettings() if frontier_settings is None else frontier_settings
     validation = ValidationTolerances() if tolerances is None else tolerances
     numeric_bau_cost = _validate_inputs(
         ev, session, signal, candidate, bau_cost, model, settings, validation
     )
+    attempt_count = 0
+    success_count = 0
+    infeasible_count = 0
+    validation_failure_count = 0
+    solver_failure_count = 0
+    level_failures: list[SavingLevelFailure] = []
+
+    def classify_failure(exc: PhysicalConstraintError, requested: float) -> None:
+        nonlocal infeasible_count, validation_failure_count, solver_failure_count
+        message = str(exc).lower()
+        if any(token in message for token in ("unattainable", "no eligible", "exceeds eligible")):
+            reason: FailureReason = "infeasible_band"
+            infeasible_count += 1
+        elif any(token in message for token in ("validation", "violat", "objective")):
+            reason = "validation_failure"
+            validation_failure_count += 1
+        else:
+            reason = "solver_failure"
+            solver_failure_count += 1
+        level_failures.append(
+            SavingLevelFailure(
+                ready_step=candidate.ready_step,
+                target_soc=candidate.target_soc,
+                requested_saving=requested,
+                reason=reason,
+            )
+        )
+
+    attempt_count += 1
     least = build_least_degradation_profile(
         ev=ev,
         session=session,
@@ -1110,6 +1375,8 @@ def build_sandwich_saving_frontier(
         frontier_settings=settings,
         tolerances=validation,
     )
+    success_count += 1
+    attempt_count += 1
     maximum = build_saving_constrained_profile(
         ev=ev,
         session=session,
@@ -1121,13 +1388,24 @@ def build_sandwich_saving_frontier(
         frontier_settings=settings,
         tolerances=validation,
     )
+    success_count += 1
     endpoint_tolerance = max(
-        settings.saving_band,
+        settings.effective_saving_band,
         settings.saving_tolerance,
         settings.cost_tolerance,
     )
     if _same_point(least, maximum) or abs(least.saving - maximum.saving) <= endpoint_tolerance:
-        endpoint = maximum
+        # Equal-cost endpoint trajectories are a tie set.  Prefer the lowest
+        # absolute stress, then the canonical energy trajectory, while keeping
+        # the analytical endpoint's achieved cost/saving.
+        endpoint = min(
+            (least, maximum),
+            key=lambda point: (
+                point.assessment.raw_battery_stress,
+                point.constructed.profile.grid_energy_kwh,
+                point.point_id,
+            ),
+        )
         collapsed = _make_optimized_profile(
             ev=ev,
             session=session,
@@ -1139,53 +1417,77 @@ def build_sandwich_saving_frontier(
             validation=endpoint.constructed.validation,
             degradation_settings=model,
             frontier_settings=settings,
-            requested_saving=None,
+            requested_saving=candidate.saving,
             endpoint_role="least_and_maximum",
         )
         points = [collapsed]
     else:
         points = [least, maximum]
-    attempted: set[float] = set()
-    while len(points) < settings.maximum_levels and len(points) > 1:
-        points.sort(key=lambda point: point.saving)
-        gaps = [
-            (right.saving - left.saving, left.saving, right.saving)
-            for left, right in pairwise(points)
-        ]
-        eligible = [
-            item
-            for item in gaps
-            if item[0] > max(2.0 * settings.saving_band, settings.frontier_gap_tolerance)
-        ]
-        if not eligible:
-            break
-        _, lower, upper = max(eligible, key=lambda item: (item[0], -item[1]))
-        midpoint = (lower + upper) / 2.0
-        if midpoint in attempted:
-            break
-        attempted.add(midpoint)
-        point = build_saving_constrained_profile(
-            ev=ev,
-            session=session,
-            signal=signal,
-            candidate=candidate,
-            bau_cost=numeric_bau_cost,
-            requested_saving=midpoint,
-            degradation_settings=model,
-            frontier_settings=settings,
-            tolerances=validation,
+    selected_levels = select_saving_levels(
+        maximum_saving=max(0.0, candidate.saving),
+        saving_step=settings.saving_step,
+        maximum_levels=settings.effective_maximum_levels,
+        zero_tolerance=settings.saving_zero_tolerance,
+    )
+    for level in selected_levels:
+        if abs(level - candidate.saving) <= endpoint_tolerance:
+            continue
+        attempt_count += 1
+        try:
+            point = build_saving_constrained_profile(
+                ev=ev,
+                session=session,
+                signal=signal,
+                candidate=candidate,
+                bau_cost=numeric_bau_cost,
+                requested_saving=level,
+                degradation_settings=model,
+                frontier_settings=settings,
+                tolerances=validation,
+            )
+        except PhysicalConstraintError as exc:
+            # Numerical failure at an intermediate level must not erase the
+            # other valid levels or the analytical maximum endpoint.
+            classify_failure(exc, level)
+            continue
+        success_count += 1
+        if point.saving <= settings.saving_zero_tolerance:
+            success_count -= 1
+            # A solver can report success while returning a non-positive
+            # realized saving; record this as a transparent validation failure.
+            validation_failure_count += 1
+            level_failures.append(
+                SavingLevelFailure(
+                    ready_step=candidate.ready_step,
+                    target_soc=candidate.target_soc,
+                    requested_saving=level,
+                    reason="nonpositive_actual_saving",
+                )
+            )
+            continue
+        point = replace(
+            point,
+            endpoint_role=(
+                "low_saving"
+                if level == selected_levels[0] and len(selected_levels) > 1
+                else "intermediate"
+            ),
         )
         if any(_same_point(point, existing) for existing in points):
-            continue
-        points.append(point)
+            level_failures.append(
+                SavingLevelFailure(
+                    ready_step=candidate.ready_step,
+                    target_soc=candidate.target_soc,
+                    requested_saving=level,
+                    reason="duplicate",
+                )
+            )
+        else:
+            points.append(point)
     points.sort(key=lambda point: point.saving)
-    if len(points) > 1:
-        for left, right in pairwise(points):
-            if (
-                right.trajectory_objective + settings.objective_tolerance
-                < left.trajectory_objective
-            ):
-                raise PhysicalConstraintError("frontier trajectory objective is not monotone.")
+    # Stress is optimized independently inside each saving band.  It is not
+    # mathematically required to be monotone in saving, so preserve the
+    # independently validated values instead of rejecting a valid frontier.
     return SavingFrontier(
         ev_id=ev.ev_id,
         target_soc=candidate.target_soc,
@@ -1193,4 +1495,25 @@ def build_sandwich_saving_frontier(
         bau_cost=numeric_bau_cost,
         points=tuple(points),
         source_candidate_id=candidate.candidate_id,
+        optimization_diagnostics=OptimizationDiagnostics(
+            optimization_attempt_count=attempt_count,
+            optimization_success_count=success_count,
+            optimization_infeasible_count=infeasible_count,
+            optimization_validation_failure_count=validation_failure_count,
+            optimization_solver_failure_count=solver_failure_count,
+        ),
+        level_failures=tuple(level_failures),
+        degradation_objective_diagnostics=DegradationObjectiveDiagnostics(
+            reporting_model_id=(
+                LFP_DEGRADATION_MODEL_ID if ev.chemistry == "LFP" else NMC_DEGRADATION_MODEL_ID
+            ),
+            optimization_model_id=(
+                "naumann_lfp_optimization_surrogate_v1"
+                if ev.chemistry == "LFP"
+                else "schmalstieg_nmc_optimization_surrogate_v1"
+            ),
+            exact_reporting_model_used_in_objective=False,
+            objective_convex=True,
+            constant_terms_excluded_from_objective=True,
+        ),
     )

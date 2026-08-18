@@ -8,7 +8,7 @@ network analysis.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import isfinite
 from numbers import Real
 from typing import Literal
@@ -113,11 +113,51 @@ class MenuCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class RequestGenerationDiagnostics:
+    """Reconciled counts for every target/ready request considered.
+
+    The counts deliberately describe request enumeration rather than the
+    number of retained menu rows.  Scientific deduplication and later display
+    capping therefore cannot hide infeasible or non-saving requests.
+    """
+
+    request_count_total: int = 0
+    request_count_feasible: int = 0
+    request_count_positive_saving: int = 0
+    request_count_no_saving: int = 0
+    request_count_infeasible: int = 0
+
+    def __post_init__(self) -> None:
+        values = (
+            self.request_count_total,
+            self.request_count_feasible,
+            self.request_count_positive_saving,
+            self.request_count_no_saving,
+            self.request_count_infeasible,
+        )
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+            raise SchemaValidationError("request diagnostics counts must be integers.")
+        if any(value < 0 for value in values):
+            raise SchemaValidationError("request diagnostics counts must be non-negative.")
+        if self.request_count_total != self.request_count_feasible + self.request_count_infeasible:
+            raise SchemaValidationError(
+                "request diagnostics must satisfy total=feasible+infeasible."
+            )
+        if self.request_count_feasible != (
+            self.request_count_positive_saving + self.request_count_no_saving
+        ):
+            raise SchemaValidationError(
+                "request diagnostics must satisfy feasible=positive+no_saving."
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class GeneratedMenu:
     """Deterministic pre-degradation menu for one EV and one session."""
 
     ev_id: str
     candidates: tuple[MenuCandidate, ...]
+    diagnostics: RequestGenerationDiagnostics = field(default_factory=RequestGenerationDiagnostics)
 
     def __post_init__(self) -> None:
         if not isinstance(self.ev_id, str) or not self.ev_id.strip():
@@ -139,11 +179,35 @@ class GeneratedMenu:
         ids = tuple(candidate.candidate_id for candidate in candidate_tuple)
         if len(set(ids)) != len(ids):
             raise SchemaValidationError("candidate identifiers must be unique.")
+        if self.diagnostics is None:
+            object.__setattr__(self, "diagnostics", RequestGenerationDiagnostics())
+        elif not isinstance(self.diagnostics, RequestGenerationDiagnostics):
+            raise SchemaValidationError("diagnostics must be RequestGenerationDiagnostics.")
 
     def candidates_for_target(self, target_soc: float) -> tuple[MenuCandidate, ...]:
         """Return candidates matching a target within exact stored precision."""
         target = _finite_real("target_soc", target_soc)
         return tuple(candidate for candidate in self.candidates if candidate.target_soc == target)
+
+    @property
+    def request_count_total(self) -> int:
+        return self.diagnostics.request_count_total
+
+    @property
+    def request_count_feasible(self) -> int:
+        return self.diagnostics.request_count_feasible
+
+    @property
+    def request_count_positive_saving(self) -> int:
+        return self.diagnostics.request_count_positive_saving
+
+    @property
+    def request_count_no_saving(self) -> int:
+        return self.diagnostics.request_count_no_saving
+
+    @property
+    def request_count_infeasible(self) -> int:
+        return self.diagnostics.request_count_infeasible
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,7 +216,10 @@ class MenuGenerationSettings:
 
     include_immediate_bau: bool = True
     include_minimum_cost: bool = True
-    deduplicate_identical_profiles: bool = True
+    # Requests must remain distinct through scientific offer generation.  The
+    # flag is retained as an explicit legacy opt-out for callers that need the
+    # old pre-Commit-10 reduction behavior.
+    deduplicate_identical_profiles: bool = False
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -208,6 +275,11 @@ def generate_candidate_menu(
     signal.validate_session_window(session)
     target_options = build_target_options(ev, session, settings)
     candidates: list[MenuCandidate] = []
+    request_count_total = 0
+    request_count_feasible = 0
+    request_count_positive = 0
+    request_count_no_saving = 0
+    request_count_infeasible = 0
 
     for target_index, target in enumerate(target_options):
         bau = build_immediate_charging_profile(
@@ -237,6 +309,7 @@ def generate_candidate_menu(
         seen_minimum_cost: set[tuple[object, ...]] = set()
 
         for ready_step in range(session.arrival_step, session.departure_step + 1):
+            request_count_total += 1
             feasibility = evaluate_request_feasibility(
                 ev,
                 session,
@@ -246,7 +319,9 @@ def generate_candidate_menu(
                 tolerance=0.0,
             )
             if not feasibility.is_feasible:
+                request_count_infeasible += 1
                 continue
+            request_count_feasible += 1
             constructed = build_minimum_cost_charging_profile(
                 ev=ev,
                 session=session,
@@ -258,6 +333,13 @@ def generate_candidate_menu(
             saving = bau.charging_cost - constructed.charging_cost
             if not isfinite(saving):
                 raise SchemaValidationError("candidate saving must be finite.")
+            zero_tolerance = settings.saving_zero_tolerance
+            if zero_tolerance is None:
+                zero_tolerance = settings.numerical_tolerance
+            if saving > zero_tolerance:
+                request_count_positive += 1
+            else:
+                request_count_no_saving += 1
             duplicate_key = _minimum_cost_duplicate_key(target, constructed, saving)
             if generation.deduplicate_identical_profiles and duplicate_key in seen_minimum_cost:
                 continue
@@ -284,7 +366,17 @@ def generate_candidate_menu(
             candidate.candidate_id,
         )
     )
-    return GeneratedMenu(ev_id=ev.ev_id, candidates=tuple(candidates))
+    return GeneratedMenu(
+        ev_id=ev.ev_id,
+        candidates=tuple(candidates),
+        diagnostics=RequestGenerationDiagnostics(
+            request_count_total=request_count_total,
+            request_count_feasible=request_count_feasible,
+            request_count_positive_saving=request_count_positive,
+            request_count_no_saving=request_count_no_saving,
+            request_count_infeasible=request_count_infeasible,
+        ),
+    )
 
 
 def _candidate_from_constructed(

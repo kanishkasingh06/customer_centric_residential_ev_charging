@@ -1,120 +1,200 @@
-# Daily EV Menu — Commit 10
+# Daily EV Menu — Algorithm 1 rich generation and paper filtering
 
-Commit 7 assembles Commit 6 fixed-request saving frontiers into one immutable,
-deterministic customer menu.  The pipeline is:
+The current stage implements Algorithm 1 through the rich generated offer set:
 
-1. validate the complete Commit 4 `GeneratedMenu`;
-2. prune ready-step change points;
-3. build exactly one Commit 6 frontier per retained request;
-4. convert frontier points and BAUs into offers with explicit provenance;
-5. normalize health across the complete structural offer pool;
-6. filter non-positive savings, remove exact duplicates, compact requests,
-   Pareto-filter, and select the bounded display menu.
+1. parse exact session and tariff intervals;
+2. construct one immediate, same-target BAU for every target SOC;
+3. evaluate every feasible ready-boundary/target request and construct its
+   minimum-cost profile;
+4. calculate request-level maximum saving (`Smax`);
+5. select deterministic value-spaced saving levels (`saving_step`, `Kmax`);
+6. solve battery-stress minimization inside each saving band;
+7. independently validate trajectories, assign roles and provenance, retain
+   BAU plus positive-saving offers, and remove exact scientific duplicates.
 
-## Request pruning
+`MenuSettings` is immutable and owns the Algorithm 1 defaults: saving step
+`5.0`, at most five levels per request, a `0.50` currency-unit saving band,
+and the existing numerical zero tolerance.  `select_saving_levels` preserves
+the lowest positive region, intermediate regions, and the exact maximum
+endpoint; when Kmax is smaller it selects deterministic indices over the full
+raw range (for example `(5, 15, 30, 40)`).
 
-For each exact target SOC, only `minimum_cost` candidates are considered. Ready
-steps are sorted and duplicate ready steps are rejected. Candidates with saving
-at or below `positive_saving_tolerance` are excluded. The remaining maximum
-savings must be nondecreasing within `pruning_saving_tolerance`; a material
-decrease is rejected. A running maximum retains every strict increase. Each
-equal-saving plateau retains its latest ready step, and the latest positive
-request is always retained. Savings are currency values.
+Each offer retains requested and achieved saving, same-target BAU cost, actual
+cost, target energy, charging trajectory, raw battery stress, optional RUL/loss
+fields, and immutable provenance flags. `BatteryStress` is schedule-intrinsic
+and lower is better; it is never normalized against the other offers in a
+menu, a Pareto set, or a display cap. The legacy `charging_health_score` field
+is retained only for source compatibility and is not serialized or used by the
+rich scientific logic.
 
-## BAU and provenance
-
-Every target has exactly one immediate same-target BAU offer with zero saving.
-Optimized offers carry immutable `OfferSource` metadata mapping:
-
-```text
-final offer ID -> frontier point ID -> source candidate ID -> endpoint role
-```
-
-BAUs use source role `bau`; optimized points preserve their Commit 6 endpoint
-role. `source_frontiers` contains exactly the frontiers built for retained
-requests and is also available as `AssembledMenu.frontiers`.
-
-## Health stage order
-
-All BAUs and all points from retained frontiers are scored together using total
-degradation fade, Commit 5's tiny-spread policy, resolution, and half-up
-quantization. Health is normalized once over that complete structural pool.
-Only then are positive-saving filtering, exact-duplicate removal, request-local
-compaction, Pareto filtering, and display selection applied. Health is not
-renormalized after reduction, so removing an extreme-fade offer after this
-stage does not change another offer's already-advertised score.
-
-Non-BAUs are retained only when:
+`generated_offers` means BAU plus every valid positive-saving Algorithm 1 offer
+after exact scientific duplicate removal. It is immutable and remains
+available even after customer-facing filtering. The paper-consistent pipeline
+is:
 
 ```text
-saving > positive_saving_tolerance
+generated_offers (Fi)
+  -> retained_offers (Fbar_i: BAU + positive saving)
+  -> compacted_offers (Ftilde_i: savings near-duplicate compaction)
+  -> pareto_offers (Pi: Pareto-efficient offers + preserved BAU anchors)
+  -> displayed_offers (Mi: deterministic customer-facing diversity selection)
 ```
 
-Values are never clipped to zero. Targets without positive optimized offers
-retain their BAU only. A no-charge target therefore has one zero-energy BAU and
-no duplicate zero-saving optimized offer.
+The default `menu_stage` is `displayed`, so the default customer menu is a
+deterministic diversity-selected subset of the compacted Pareto set containing
+only positive-saving, non-BAU customer options. One same-target BAU reference
+per feasible target remains available separately as `bau_reference_offers`; it
+never consumes a customer-option slot. The rich set is still exposed as
+`generated_offers`; it is never overwritten by a derived stage. Use
+`menu_stage="generated"`, `"compacted"`, `"pareto"`, or `"displayed"` in
+Python, or `--menu-stage` in the CLI. `--menu-stage pareto` exposes all Pareto
+offers (including preserved BAU anchors); only the displayed stage applies the
+customer-facing diversity limits.
 
-## Exact duplicates and compaction
+Compaction uses the actual achieved saving, not requested or display-rounded
+saving. It is performed only within an exact fixed request group identified by
+absolute ready-by minute and target battery energy. The default
+`delta_saving_merge` is `5.0` currency units, independent of the `0.50`
+currency-unit saving-band feasibility tolerance. Saving buckets use the
+deterministic convention
+`floor((actual_saving + numerical_tolerance) / delta_saving_merge)`; a zero
+threshold disables near-duplicate compaction. The lowest-stress offer in each
+bucket is retained, and the true maximum-saving endpoint is always preserved.
+Compaction never merges different ready promises or different target SOCs.
 
-Exact duplicate non-BAUs are removed first, including equal target, ready step,
-saving, health, cost, profile, and degradation assessment. The lexicographically
-smallest offer ID wins. This applies even when `saving_merge_gap == 0` and does
-not cross request keys.
+Pareto dominance uses absolute ready minute, target energy, actual saving, and
+raw schedule-intrinsic battery stress. Earlier readiness, higher target, higher
+saving, and lower stress are better. Values are compared with explicit
+tolerances and without requested saving, display rounding, normalized health,
+role labels, or weighted sums. A BAU reference can be mathematically
+dominated; it is still preserved and marked `is_preserved_bau_anchor`, while
+`is_pareto_efficient` independently reports mathematical efficiency.
 
-Compaction then operates only within `(target_soc, ready_step)`. Offers are
-sorted by saving and ID and use deterministic chain-connected clusters: the next
-offer joins the current cluster when its saving difference from the previous
-offer is strictly less than `saving_merge_gap`. Thus `0.00, 0.09, 0.18` is one
-cluster for a `0.10` gap. A difference exactly equal to the gap does not merge.
+### Final customer-facing diversity selection
 
-The cluster winner is selected by higher quantized health; health differences
-within `health_tie_tolerance` use higher realized saving; a further tie uses the
-lexicographically smaller offer ID. The winner keeps its own profile,
-assessment, and provenance.
+The final stage selects `M_i` from `P_i` without changing any scientific offer
+stage. `maximum_displayed_offers=12` means at most 12 non-BAU customer options;
+BAU references are separate scientific baselines. A generous safety cap of 12
+offers per target prevents pathological concentration, but the allocation is
+not mechanically `four targets × three offers`: after one maximum-saving and,
+when meaningfully distinct, one least-degradation anchor per target, remaining
+slots are selected globally by deterministic farthest-point marginal distance.
+Tie-breaking is larger distance, larger saving, lower raw fade, earlier ready
+time, higher target SOC, then scientific ID. No BAU is selected by this stage.
 
-## Pareto rule
+Distinctness uses the equal-weight Euclidean feature vector
+`[ready_delay, target_soc, actual_saving, total_capacity_fade]`. Ready delay,
+saving, and fade use dynamic min–max scaling over the candidate/display set;
+target SOC uses its fixed physical `[0,1]` domain; zero ranges map to zero.
+The raw scientific attributes are never changed and no normalized health score
+is introduced. Pairwise component distances, overall distances, nearest
+neighbours, marginal selection contributions, labels (`highly_distinct`,
+`moderately_distinct`, `weakly_distinct`, `near_duplicate`), ranges, target
+coverage/entropy, and near-duplicate pairs are exposed in Python and optional
+diagnostic JSON. These geometric diagnostics are not utility or behavioural
+claims. The minimum-overall-distance guard is transparent and configurable;
+it does not turn readiness spacing into an automatic rejection rule.
 
-Offer `a` dominates `b` when it is no later, has no lower target, no lower
-saving, and no lower health, with at least one strict improvement:
+For manual inspection, this checkout includes deterministic, unversioned
+inspection artifacts under `artifacts/menu_distinctness/`: complete displayed
+and BAU-reference CSVs, pairwise-distance CSVs, per-EV JSON summaries, and a
+Markdown report for three representative profiles. These are generated
+inspection outputs, not runtime inputs or a new reporting subsystem.
+
+Compaction removes near-duplicate saving choices only within the same
+ready-by time and target SOC request. It does not merge offers across
+different readiness promises or different SOC targets. The current displayed
+menu is the compacted Pareto set's globally diversity-selected non-BAU options;
+same-target BAU anchors are available only in `bau_reference_offers`. A later
+display-diversity stage may further reduce closely spaced ready-time choices
+only if this policy is intentionally changed; it must not change the
+scientific offer set.
+
+Saving levels and saving bands use absolute currency units. The optional
+relative-step policy is intentionally disabled; `saving_step` is never silently
+scaled by BAU cost. Every returned optimized offer records
+`requested_saving`, `saving_band_lower`, `saving_band_upper`, actual saving, and
+`saving_band_violation`. Request enumeration diagnostics reconcile
+`total = feasible + infeasible` and `feasible = positive-saving + no-saving`.
+Optimizer diagnostics separately count attempts, successes, infeasible bands,
+validation failures, and solver failures. Use the Python result's diagnostics
+or `--include-diagnostics` in JSON for these details; normal text output does
+not expose solver internals.
+
+The active degradation quantity is incremental capacity fade, not a
+menu-relative health score:
 
 ```text
-ready_a <= ready_b
-target_a >= target_b - target_dominance_tolerance
-saving_a >= saving_b - saving_dominance_tolerance
-health_a >= health_b - health_dominance_tolerance
+DeltaQ_total = DeltaQ_calendar + DeltaQ_cycle
+DeltaQ_calendar = DeltaQ_connected_window + DeltaQ_parked_period
 ```
 
-Ready steps use exact integer comparison. SOC, saving, and health use their
-separate tolerances and strict `>` comparisons beyond those tolerances. Exact
-duplicates are removed before Pareto filtering. BAUs are policy-protected and
-are never removed.
+All terms are fractions of nominal usable capacity (`2e-5` means `0.002%`).
+LFP offers use the Naumann parameter family and NMC offers use the Schmalstieg
+parameter family. Calendar aging uses the convex chemistry-specific SOC shape,
+Arrhenius temperature scaling, and the local calendar-age slope. Cycle aging
+uses battery-side throughput, DoD, peak C-rate, and the local accumulated-FEC
+slope. Active IDs are `naumann_lfp_capacity_fade_anchor_v1` and
+`schmalstieg_nmc_capacity_fade_anchor_v1`; “anchor” explicitly means a
+literature-family calibration, not an exact reproduction of published fitted
+coefficients.
 
-## Display selection
+The reporting model includes the exact peak-C-rate cycle factor after each
+trajectory is solved. The SLSQP frontier objective uses a labelled convex
+optimization surrogate (`*_optimization_surrogate_v1`) consisting of the
+trajectory-dependent calendar term and a convex C-rate guard; fixed throughput
+and parked-period constants are added back by reporting. Diagnostics expose
+both model IDs and state that the exact reporting model is not silently claimed
+to be the solver objective.
 
-`display_cap` includes BAUs. The mandatory set contains every BAU, the global
-maximum-saving non-BAU, and the global highest-health non-BAU. Anchor ties use:
+The supplied checkout does not contain the cited papers' fitted coefficient
+tables, so immutable defaults are labelled `literature_anchor_calibrated` with
+citations; they are not silently presented as exact published fits.
+Temperature, battery age, and accumulated FEC are carried in every evaluation.
+At zero accumulated FEC the square-root cycle derivative is regularized with
+the explicit immutable `minimum_effective_fec` floor (default `1.0` FEC).
+The older `minimum_reference_fec` spelling is only a compatibility alias and
+cannot define a second floor.
+Diagnostics expose the raw starting FEC, effective FEC, floor, whether the
+floor was active, and its source; the floor changes only the local derivative,
+not the modeled fade components. The standalone service uses an explicit
+16-hour post-commute parked-period assumption by default and serializes both
+`parked_period_hours` and `parked_period_source` (`assumed_default` versus
+`user_input`). Pass `daytime_parked_hours` (or
+`DegradationSettings(parked_day_hours=None)`) when that period is not
+defensible; disabled parked fade is marked `deferred_not_modeled`. Connected-
+window and parked-period fade are calendar-aging subcomponents, not separate
+physical mechanisms.
 
-- maximum saving, then higher health, earlier ready step, higher target, lower ID;
-- maximum health, then higher saving, earlier ready step, higher target, lower ID.
+The legacy `battery_stress`/`BatteryStress` field is retained as a deprecated
+alias of `total_capacity_fade`; it cannot diverge and is lower-is-better.
+`charging_health_score` remains only for source compatibility and is a
+deterministic capacity-fade display alias; the removed `health_score_resolution`
+and min–max helper are rejected/deleted, so no normalized-health path remains.
+The model does not
+apply an artificial low-SOC aging penalty, does not claim vehicle-specific RUL
+or warranty outcomes, and does not use a weighted cost/degradation objective.
+Provenance flags include `is_bau`, `is_low_saving`,
+`is_intermediate`, `is_maximum_saving`, `is_least_degradation`, and
+`is_endpoint`; the primary role is deterministic (`bau`, `least_and_maximum`,
+`least_degradation`, `maximum_saving`, `low_saving`, `intermediate`) and is not
+inferred from row position.
 
-If the distinct mandatory set cannot fit, assembly raises
-`PhysicalConstraintError`; it never silently deletes a BAU or anchor. After
-mandatory anchors are reserved, ready-step diversity is best-effort and is
-processed in ascending ready-step order. Remaining slots use saving descending,
-health descending, readiness ascending, target descending, and ID ascending.
+Scientific duplicates use unrounded, tolerance-quantized absolute ready
+boundary, target energy, actual saving, raw stress, and charging-energy
+trajectory. Display duplicate-looking rows are collapsed deterministically at
+serialization time, preferring lower stress, lower cost, and then the
+lexicographically smallest trajectory. Internal provenance is preserved.
 
-Final presentation order is target SOC ascending, BAU before optimized, ready
-step ascending, saving ascending, health descending, and offer ID ascending.
-Selection priority and presentation order are intentionally separate.
+The nominal 15-minute grid controls physical scheduling resolution. It does not
+determine final customer-facing spacing of menu options. This stage applies
+paper-consistent saving compaction, Pareto filtering, and the deterministic
+customer-facing diversity selection described above; it does not add
+customer-choice modelling.
 
-Assembly settings use separate finite, nonnegative tolerances for pruning,
-positive-saving filtering, compaction, saving dominance, health dominance,
-target dominance, and health ties. Saving units are currency, target units are
-SOC fractions, and health units are score points.
+## Deferred beyond the filtering stage
 
-## Deferred beyond Commit 7
-
-Commit 7 does not add customer-choice modelling, preference estimation,
+This filtering stage does not add customer-choice modelling, preference estimation,
 stochastic realization, Monte Carlo, multi-day state coupling, fleet
 aggregation, network simulation, plotting, reporting, file I/O, or experiment
 scripts.
@@ -168,12 +248,14 @@ including finite negative prices because the underlying research signal permits
 them. The returned
 `GeneratedCustomerMenu` retains the complete `AssembledMenu` for auditability
 and exposes aligned `CustomerMenuRow` objects containing ready time, target SOC,
-cost, saving, health, energy drawn, source role, and the full charging schedule.
+requested/actual saving, cost, raw battery stress, provenance flags, and the
+full charging schedule.
 `charging_schedule_kw` is grid-side charging power for each interval. Its
 aligned `interval_start_times`, `interval_end_times`, and
 `interval_duration_minutes` make the schedule self-describing; the nominal
-`timestep_minutes` is not necessarily each interval's duration. Roles are `bau`, `least_degradation`,
-`intermediate`, `maximum_saving`, and `least_and_maximum`.
+`timestep_minutes` is not necessarily each interval's duration. Roles are
+`bau`, `low_saving`, `intermediate`, `least_degradation`, `maximum_saving`, and
+`least_and_maximum`.
 
 Commit 8 did not add a CLI, external configuration files, manufacturer-data
 scraping, customer-choice modelling, Monte Carlo realization, multi-day state
@@ -220,16 +302,33 @@ The required `generate` arguments are `--ev-model`, `--arrival`, `--departure`,
 - `--buffer-soc 10` (percentage of usable capacity);
 - `--tariff research_tou`;
 - `--flat-price 7.0` currency/kWh when `--tariff flat` is selected;
-- `--temperature-c 30` degrees Celsius;
+- `--battery-temperature-c 25` degrees Celsius (`--temperature-c` remains an alias);
+- `--battery-age-years 1` and `--accumulated-fec 0`;
+- optional `--daytime-parked-hours` for an explicit post-commute horizon;
 - `--timestep-minutes 15`;
-- no `--display-cap` limit;
+- `--menu-stage displayed` (the diversity-selected non-BAU Pareto stage);
+- `--max-displayed-offers 12` (or `--maximum-displayed-offers`; non-BAU options only);
+- `--max-offers-per-target 12` (a generous safety cap, not a fixed allocation);
+- `--exclude-bau-from-display` (the default; BAU rows are references, not choices);
+- `--include-bau-references` to include separate same-target BAU rows in JSON;
+- `--include-distinctness-diagnostics` to include feature scaling, pairwise distances,
+  nearest-neighbour metrics, and selection diagnostics;
+- `--min-ready-separation-minutes 120`, `--min-saving-difference 5`,
+  `--min-saving-fraction-of-bau 0.05`, and `--min-relative-stress-difference 0.02`;
 - `--format text`.
 
 `--flat-price` is valid only with `--tariff flat`; finite negative flat prices are supported.
 `--include-schedule` and `--include-intervals` are valid only with `--format json`. Text cost and
-saving values are in currency units, health is a score from 0 to 100, and schedules are grid-side
-kW values aligned to the returned interval metadata. Add `--include-intervals` to expose exact
+saving values are in currency units, and `TotalFade` is an absolute incremental capacity-fade
+fraction (lower is better). Schedules are grid-side kW values aligned to the returned interval metadata. Add `--include-intervals` to expose exact
 boundaries, durations, and prices in JSON. The default text output intentionally stays compact.
+Use `--include-diagnostics` with JSON to include reconciled request counts,
+optimizer outcome counts, per-target completeness summaries, and structured
+saving-level failures. `--include-pipeline-stages` additionally serializes all
+generated, retained, compacted, Pareto-efficient, preserved-BAU, Pareto,
+displayed, and BAU-reference arrays. Uncapped text output warns when more than 100 rich offers
+were generated; it is never silently truncated. Text output reports every
+pipeline count and notes that BAU references may be mathematically dominated.
 
 Machine-readable output is available without exposing internal schema objects:
 
@@ -240,6 +339,11 @@ evmenu generate ... --format json
 Schedules are omitted from JSON by default to keep output compact. Add `--include-schedule` to
 include `charging_schedule_kw`, the grid-side power for each generated interval.
 JSON numbers retain the unrounded service values; the text table rounds only for display.
+Diagnostics expose the selected/rejected reason, target rank, diversity score,
+pairwise distinctness, nearest option, and per-target selection summaries. The
+text table includes `Role` and `SelectedAs`; `TotalFade` is raw incremental
+capacity fade, where lower is better. BAU references are never customer
+options and may be mathematically dominated.
 
 Other commands:
 

@@ -10,6 +10,7 @@ from evmenu import (
     CustomerMenuRow,
     EVModel,
     GeneratedCustomerMenu,
+    MenuAssemblySettings,
     PhysicalConstraintError,
     PricePeriod,
     SchemaValidationError,
@@ -40,9 +41,9 @@ def test_high_level_service_generates_aligned_customer_rows() -> None:
     assert menu.departure_time == "07:00"
     assert menu.tariff_is_illustrative
     assert menu.offers
-    assert tuple(row.offer_id for row in menu.offers) == tuple(
+    assert {row.offer_id for row in menu.offers} == {
         offer.offer_id for offer in menu.assembled_menu.offers
-    )
+    }
     assert all(isinstance(row, CustomerMenuRow) for row in menu.offers)
     assert all(len(row.charging_schedule_kw) == 48 for row in menu.offers)
     assert menu.timestep_minutes == 15
@@ -56,6 +57,98 @@ def test_overnight_ready_times_are_clock_times() -> None:
     menu = _menu()
     assert all(len(row.ready_time) == 5 and row.ready_time[2] == ":" for row in menu.offers)
     assert any(row.ready_time.startswith("0") for row in menu.offers)
+
+
+def _absolute_ready_minutes(menu: GeneratedCustomerMenu) -> tuple[int, ...]:
+    offers = {offer.offer_id: offer for offer in menu.assembled_menu.offers}
+    return tuple(
+        (
+            menu.interval_start_minutes[offers[row.offer_id].ready_step]
+            if offers[row.offer_id].ready_step < len(menu.interval_start_minutes)
+            else menu.interval_end_minutes[-1]
+        )
+        for row in menu.offers
+    )
+
+
+def test_customer_rows_are_sorted_by_absolute_ready_time_same_day_and_overnight() -> None:
+    same_day = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time="11:07",
+        departure_time="18:52",
+        current_soc=0.35,
+        next_trip_distance_km=45.0,
+    )
+    overnight = _menu()
+    assert _absolute_ready_minutes(same_day) == tuple(sorted(_absolute_ready_minutes(same_day)))
+    assert _absolute_ready_minutes(overnight) == tuple(sorted(_absolute_ready_minutes(overnight)))
+    assert overnight.interval_start_minutes[0] == 19 * 60
+    assert any(value >= 24 * 60 for value in _absolute_ready_minutes(overnight))
+
+    endpoint = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time="00:00",
+        departure_time="00:01",
+        current_soc=0.999,
+        next_trip_distance_km=0.0,
+        buffer_soc=0.0,
+    )
+    assert any(row.ready_time == "00:01" for row in endpoint.bau_references)
+
+
+def test_customer_row_ties_use_target_then_role_then_offer_id() -> None:
+    menu = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time="21:07",
+        departure_time="06:52",
+        current_soc=0.35,
+        next_trip_distance_km=45.0,
+        menu_stage="pareto",
+    )
+    rows_at_time: dict[int, list[CustomerMenuRow]] = {}
+    offers = {offer.offer_id: offer for offer in menu.assembled_menu.offers}
+    role_order = {
+        "bau": 0,
+        "low_saving": 1,
+        "intermediate": 2,
+        "least_degradation": 3,
+        "maximum_saving": 4,
+        "least_and_maximum": 5,
+    }
+    for row in menu.offers:
+        absolute = (
+            menu.interval_start_minutes[offers[row.offer_id].ready_step]
+            if offers[row.offer_id].ready_step < len(menu.interval_start_minutes)
+            else menu.interval_end_minutes[-1]
+        )
+        rows_at_time.setdefault(absolute, []).append(row)
+    for rows in rows_at_time.values():
+        assert list(rows) == sorted(
+            rows,
+            key=lambda row: (
+                row.target_soc_percent,
+                row.actual_saving,
+                role_order[row.role],
+                row.offer_id,
+            ),
+        )
+    assert any(len({row.target_soc_percent for row in rows}) > 1 for rows in rows_at_time.values())
+
+
+def test_chronological_presentation_sort_preserves_display_cap_offer_set() -> None:
+    menu = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time="21:07",
+        departure_time="06:52",
+        current_soc=0.35,
+        next_trip_distance_km=45.0,
+        assembly_settings=MenuAssemblySettings(display_cap=8),
+    )
+    assert len(menu.offers) == 8
+    assert menu.assembled_menu.display_cap == 8
+    assert {row.offer_id for row in menu.offers} == {
+        offer.offer_id for offer in menu.assembled_menu.offers
+    }
 
 
 def test_equal_times_are_rejected_as_ambiguous() -> None:
@@ -205,9 +298,9 @@ def test_one_minute_service_session_preserves_exact_interval_and_energy_cap() ->
         menu.ev_model.onboard_ac_power_kw / 60.0
     )
     assert all(len(row.charging_schedule_kw) == 1 for row in menu.offers)
-    assert max(max(offer.profile.grid_energy_kwh) for offer in menu.assembled_menu.offers) <= (
-        menu.ev_model.onboard_ac_power_kw / 60.0 + 1e-12
-    )
+    assert max(
+        max(offer.profile.grid_energy_kwh) for offer in menu.assembled_menu.generated_offers
+    ) <= (menu.ev_model.onboard_ac_power_kw / 60.0 + 1e-12)
 
 
 @pytest.mark.parametrize(
@@ -597,9 +690,105 @@ def test_generated_menu_direct_validation_and_exact_row_correspondence() -> None
 def test_rows_match_every_assembled_offer_exactly() -> None:
     menu = _menu()
     source = {item.offer_id: item for item in menu.assembled_menu.source_metadata}
-    for row, offer in zip(menu.offers, menu.assembled_menu.offers, strict=True):
+    offers = {offer.offer_id: offer for offer in menu.assembled_menu.offers}
+    for row in menu.offers:
+        offer = offers[row.offer_id]
         assert row.offer_id == offer.offer_id
         assert row.target_soc_percent == pytest.approx(offer.target_soc * 100.0)
         assert row.energy_drawn_kwh == pytest.approx(sum(offer.profile.grid_energy_kwh))
         assert row.charging_schedule_kw == offer.profile.power_kw
         assert row.role == source[offer.offer_id].endpoint_role
+
+
+def test_rich_generated_stage_exposes_intermediate_savings_without_normalized_health() -> None:
+    menu = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time="21:07",
+        departure_time="06:52",
+        current_soc=0.35,
+        next_trip_distance_km=45.0,
+    )
+    assert menu.generated_offer_count == len(menu.generated_offers)
+    assert len(menu.offers) == menu.pipeline_diagnostics.displayed_offer_count
+    assert menu.generated_offer_count > len(menu.offers)
+    assert len(menu.retained_offers) == menu.pipeline_diagnostics.retained_offer_count
+    assert len(menu.compacted_offers) == menu.pipeline_diagnostics.compacted_offer_count
+    assert len(menu.pareto_offers) == menu.pipeline_diagnostics.pareto_offer_count
+    assert any(row.role == "low_saving" for row in menu.generated_offers)
+    assert any(row.role == "intermediate" for row in menu.generated_offers)
+    assert all(row.raw_battery_stress is not None for row in menu.generated_offers)
+    assert all(row.minimum_effective_fec == pytest.approx(1.0) for row in menu.generated_offers)
+    assert all(row.effective_fec_at_start == pytest.approx(1.0) for row in menu.generated_offers)
+    assert all(row.fec_regularization_applied for row in menu.generated_offers)
+    assert all(row.parked_period_hours == pytest.approx(16.0) for row in menu.generated_offers)
+    assert all(row.parked_period_source == "assumed_default" for row in menu.generated_offers)
+    assert menu.assembled_menu.display_cap is None
+
+
+def test_rich_diagnostics_and_absolute_metric_metadata_are_reconciled() -> None:
+    menu = _menu()
+    assert menu.request_count_total == menu.request_count_feasible + menu.request_count_infeasible
+    assert menu.request_count_feasible == (
+        menu.request_count_positive_saving + menu.request_count_no_saving
+    )
+    assert menu.optimization_diagnostics.optimization_attempt_count == (
+        menu.optimization_diagnostics.optimization_success_count
+        + menu.optimization_diagnostics.optimization_infeasible_count
+        + menu.optimization_diagnostics.optimization_validation_failure_count
+        + menu.optimization_diagnostics.optimization_solver_failure_count
+    )
+    for row in menu.generated_offers:
+        assert row.battery_metric_model_id == "semi_empirical_total_fade_v1"
+        assert row.same_target_bau_cost is not None
+        assert row.actual_saving is not None and row.actual_cost is not None
+        assert row.actual_saving + row.actual_cost == pytest.approx(row.same_target_bau_cost)
+
+
+def test_user_parked_period_and_zero_fec_provenance_are_serialized() -> None:
+    menu = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time="21:07",
+        departure_time="06:52",
+        current_soc=0.35,
+        next_trip_distance_km=45.0,
+        accumulated_equivalent_full_cycles=0.0,
+        daytime_parked_hours=12.0,
+    )
+    assert menu.generated_offers
+    assert all(row.parked_period_hours == pytest.approx(12.0) for row in menu.generated_offers)
+    assert all(row.parked_period_source == "user_input" for row in menu.generated_offers)
+    assert all(row.effective_fec_at_start == pytest.approx(1.0) for row in menu.generated_offers)
+    assert all(row.fec_regularization_applied for row in menu.generated_offers)
+
+
+def test_service_exposes_all_filtering_stages_and_cap_is_after_pareto() -> None:
+    generated = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time="21:07",
+        departure_time="06:52",
+        current_soc=0.35,
+        next_trip_distance_km=45.0,
+        menu_stage="generated",
+    )
+    displayed = generate_ev_menu(
+        ev_model="generic_40kwh_lfp",
+        arrival_time="21:07",
+        departure_time="06:52",
+        current_soc=0.35,
+        next_trip_distance_km=45.0,
+        assembly_settings=MenuAssemblySettings(display_cap=8),
+    )
+    assert generated.menu_stage == "generated"
+    assert len(generated.offers) == generated.pipeline_diagnostics.generated_offer_count
+    assert len(generated.displayed_offers) == generated.pipeline_diagnostics.displayed_offer_count
+    assert len(generated.displayed_offers) < len(generated.offers)
+    assert len(generated.compacted_offers) < len(generated.generated_offers)
+    assert len(generated.pareto_offers) <= len(generated.compacted_offers)
+    assert displayed.menu_stage == "displayed"
+    assert len(displayed.offers) == 8
+    assert len(displayed.pareto_offers) > len(displayed.offers)
+    assert len(displayed.bau_references) == 4
+    assert all(row.role != "bau" and row.saving > 0.0 for row in displayed.offers)
+    distinctness = displayed.pipeline_diagnostics.distinctness_diagnostics
+    assert distinctness is not None
+    assert len(distinctness.option_metrics) == len(displayed.displayed_offers)

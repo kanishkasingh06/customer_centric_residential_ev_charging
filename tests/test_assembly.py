@@ -11,10 +11,12 @@ from evmenu import (
     AssembledMenu,
     ChargingSession,
     DegradationSettings,
+    DisplayDiversityParameters,
     EVSpec,
     FrontierSettings,
     MenuAssemblySettings,
     MenuGenerationSettings,
+    MenuOffer,
     MenuSettings,
     PhysicalConstraintError,
     PlanningSignal,
@@ -66,6 +68,166 @@ def test_assembly_settings_validate() -> None:
         MenuAssemblySettings(display_cap=0)
     with pytest.raises(PhysicalConstraintError):
         MenuAssemblySettings(saving_merge_gap=-1.0)
+    with pytest.raises(SchemaValidationError):
+        MenuAssemblySettings(delta_saving_merge=True)
+    assert MenuAssemblySettings(delta_saving_merge=0.0).delta_saving_merge == 0.0
+    assert (
+        MenuAssemblySettings(
+            target_energy_dominance_tolerance_kwh=0.0
+        ).target_energy_dominance_tolerance_kwh
+        == 0.0
+    )
+
+
+def test_display_diversity_parameters_validate_and_are_documented_defaults() -> None:
+    defaults = DisplayDiversityParameters()
+    assert defaults.maximum_displayed_offers == 12
+    assert defaults.maximum_offers_per_target == 12
+    assert defaults.minimum_ready_separation_minutes == 120
+    with pytest.raises(SchemaValidationError):
+        DisplayDiversityParameters(maximum_displayed_offers=True)
+    with pytest.raises(PhysicalConstraintError):
+        DisplayDiversityParameters(minimum_saving_difference=-1.0)
+    with pytest.raises(PhysicalConstraintError):
+        DisplayDiversityParameters(minimum_relative_stress_difference=1.1)
+
+
+def test_displayed_stage_is_diverse_subset_and_other_stages_remain_immutable() -> None:
+    ev, session, signal, menu = _generated()
+    assembled = assemble_customer_menu(
+        ev=ev,
+        session=session,
+        signal=signal,
+        generated_menu=menu,
+        frontier_settings=FrontierSettings(maximum_levels=2),
+    )
+    displayed_ids = {offer.offer_id for offer in assembled.displayed_offers}
+    pareto_ids = {offer.offer_id for offer in assembled.pareto_offers}
+    generated_snapshot = tuple(assembled.generated_offers)
+    assert displayed_ids <= pareto_ids
+    assert tuple(assembled.generated_offers) == generated_snapshot
+    assert len(assembled.displayed_offers) <= 12
+    assert all(offer.advertised_saving > 0.0 for offer in assembled.displayed_offers)
+    by_target: dict[float, list[MenuOffer]] = {}
+    for offer in assembled.displayed_offers:
+        by_target.setdefault(offer.target_soc, []).append(offer)
+    for offers in by_target.values():
+        assert len(offers) <= 12
+    covered_targets = sum(
+        any(offer.advertised_saving > 0.0 for offer in offers) for offers in by_target.values()
+    )
+    summary = assembled.pipeline_diagnostics.display_selection_summary
+    assert summary is not None
+    assert covered_targets == summary.positive_target_coverage_count
+
+
+def test_pareto_stage_exposes_all_pareto_offers_not_diversity_subset() -> None:
+    ev, session, signal, menu = _generated()
+    assembled = assemble_customer_menu(
+        ev=ev,
+        session=session,
+        signal=signal,
+        generated_menu=menu,
+        frontier_settings=FrontierSettings(maximum_levels=2),
+        assembly_settings=MenuAssemblySettings(menu_stage="pareto"),
+    )
+    assert assembled.menu_stage == "pareto"
+    assert len(assembled.offers) == len(assembled.pareto_offers)
+    assert len(assembled.displayed_offers) <= 12
+    assert len(assembled.generated_offers) == len(
+        {offer.target_soc for offer in assembled.generated_offers}
+    ) + sum(1 for offer in assembled.generated_offers if offer.advertised_saving > 0.0)
+
+
+def test_close_ready_tradeoff_requires_both_raw_stress_and_saving_difference() -> None:
+    ev, session, signal, menu = _generated()
+    assembled = assemble_customer_menu(
+        ev=ev,
+        session=session,
+        signal=signal,
+        generated_menu=menu,
+        frontier_settings=FrontierSettings(maximum_levels=2),
+    )
+    bau = next(
+        offer
+        for offer in assembled.compacted_offers
+        if offer.target_soc == 0.8 and offer.advertised_saving == 0.0
+    )
+    base = next(
+        offer
+        for offer in assembled.compacted_offers
+        if offer.target_soc == bau.target_soc and offer.advertised_saving > 0.0
+    )
+    profile_a = replace(
+        base.profile,
+        grid_energy_kwh=tuple(value + 0.01 for value in base.profile.grid_energy_kwh),
+    )
+    profile_b = replace(
+        base.profile,
+        grid_energy_kwh=tuple(value + 0.02 for value in base.profile.grid_energy_kwh),
+    )
+    anchor = replace(
+        bau,
+        offer_id="display-bau",
+        ready_boundary_absolute_minute=1000,
+        raw_battery_stress=10.0,
+    )
+    lower_stress = replace(
+        base,
+        offer_id="display-lower-stress",
+        ready_boundary_absolute_minute=1100,
+        advertised_saving=10.0,
+        charging_cost=base.same_target_bau_cost - 10.0,
+        raw_battery_stress=20.0,
+        profile=profile_a,
+    )
+    higher_saving = replace(
+        base,
+        offer_id="display-higher-saving",
+        ready_boundary_absolute_minute=1200,
+        advertised_saving=20.0,
+        charging_cost=base.same_target_bau_cost - 20.0,
+        raw_battery_stress=30.0,
+        profile=profile_b,
+    )
+    source = next(
+        source for source in assembled.compacted_metadata if source.offer_id == bau.offer_id
+    )
+    optimized_source = next(
+        source for source in assembled.compacted_metadata if source.offer_id == base.offer_id
+    )
+    source_by_id = {
+        "display-bau": replace(source, offer_id="display-bau"),
+        "display-lower-stress": replace(
+            optimized_source,
+            offer_id="display-lower-stress",
+            endpoint_role="least_degradation",
+        ),
+        "display-higher-saving": replace(
+            optimized_source,
+            offer_id="display-higher-saving",
+            endpoint_role="maximum_saving",
+        ),
+    }
+    displayed, _summary, _targets, _decisions, _distinctness = (
+        assembly_module._display_diversity_selection(
+            (anchor, lower_stress, higher_saving),
+            source_by_id,
+            DisplayDiversityParameters(
+                maximum_displayed_offers=3, minimum_saving_fraction_of_bau=0.0
+            ),
+            numerical_tolerance=1e-8,
+            positive_saving_tolerance=1e-8,
+            saving_tolerance=1e-8,
+            target_energy_tolerance=1e-8,
+            battery_stress_tolerance=1e-8,
+            ready_tolerance_minutes=0,
+        )
+    )
+    assert {offer.offer_id for offer in displayed} == {
+        "display-lower-stress",
+        "display-higher-saving",
+    }
 
 
 def test_change_point_pruning_is_positive_and_deterministic() -> None:
@@ -102,6 +264,7 @@ def test_assembled_menu_is_bounded_aligned_and_deterministic() -> None:
         assembly_settings=settings,
     )
     assert first == second
+    assert settings.display_cap is not None
     assert 1 <= len(first.offers) <= settings.display_cap
     assert len(first.offers) == len(first.assessments)
     assert len({offer.offer_id for offer in first.offers}) == len(first.offers)
@@ -124,20 +287,22 @@ def test_all_bau_offers_are_preserved() -> None:
         frontier_settings=FrontierSettings(maximum_levels=2),
         assembly_settings=MenuAssemblySettings(display_cap=12),
     )
-    assert bau_ids <= {offer.offer_id for offer in assembled.offers}
+    assert bau_ids == {offer.offer_id for offer in assembled.bau_reference_offers}
+    assert not any(offer.offer_id in bau_ids for offer in assembled.displayed_offers)
 
 
-def test_display_cap_must_fit_bau_references() -> None:
+def test_display_cap_applies_only_to_non_bau_options() -> None:
     ev, session, signal, menu = _generated()
     bau_count = sum(candidate.kind == "immediate_bau" for candidate in menu.candidates)
-    with pytest.raises(PhysicalConstraintError, match="BAU"):
-        assemble_customer_menu(
-            ev=ev,
-            session=session,
-            signal=signal,
-            generated_menu=menu,
-            assembly_settings=MenuAssemblySettings(display_cap=max(1, bau_count - 1)),
-        )
+    assembled = assemble_customer_menu(
+        ev=ev,
+        session=session,
+        signal=signal,
+        generated_menu=menu,
+        assembly_settings=MenuAssemblySettings(display_cap=12),
+    )
+    assert len(assembled.displayed_offers) <= 12
+    assert len(assembled.bau_reference_offers) == bau_count
 
 
 def test_generated_menu_ev_mismatch_is_rejected() -> None:
@@ -185,8 +350,9 @@ def test_negative_or_zero_saving_frontiers_are_not_required() -> None:
         menu_settings=MenuSettings(),
         assembly_settings=MenuAssemblySettings(display_cap=12),
     )
-    assert assembled.offers
-    assert all(offer.advertised_saving == 0.0 for offer in assembled.offers)
+    assert not assembled.offers
+    assert assembled.bau_reference_offers
+    assert all(offer.advertised_saving == 0.0 for offer in assembled.bau_reference_offers)
 
 
 def _prune_case(values: list[float], *, duplicate_ready: bool = False) -> GeneratedMenu:
@@ -436,10 +602,10 @@ def test_exact_duplicate_removal_works_with_zero_gap() -> None:
         frontier_settings=FrontierSettings(maximum_levels=2),
         assembly_settings=MenuAssemblySettings(display_cap=20, saving_merge_gap=0.0),
     )
-    offer = next(item for item in assembled.offers if item.advertised_saving > 0.0)
+    offer = next(item for item in assembled.compacted_offers if item.advertised_saving > 0.0)
     duplicate_a = replace(offer, offer_id="duplicate-a")
     duplicate_z = replace(offer, offer_id="duplicate-z")
-    assessments = {item.candidate_id: item for item in assembled.assessments}
+    assessments = {item.candidate_id: item for item in assembled.compacted_assessments}
     assessments["duplicate-a"] = replace(assessments[offer.offer_id], candidate_id="duplicate-a")
     assessments["duplicate-z"] = replace(assessments[offer.offer_id], candidate_id="duplicate-z")
     result = assembly_module._remove_exact_duplicates(
@@ -458,7 +624,7 @@ def test_compaction_boundaries_chain_and_tie_breaks() -> None:
         frontier_settings=FrontierSettings(maximum_levels=2),
         assembly_settings=MenuAssemblySettings(display_cap=20),
     )
-    base = next(item for item in assembled.offers if item.advertised_saving > 0.0)
+    base = next(item for item in assembled.compacted_offers if item.advertised_saving > 0.0)
     chain = tuple(
         replace(
             base,
@@ -493,7 +659,7 @@ def test_pareto_directions_and_strictness() -> None:
         frontier_settings=FrontierSettings(maximum_levels=2),
         assembly_settings=MenuAssemblySettings(display_cap=20),
     )
-    base = next(item for item in assembled.offers if item.advertised_saving > 0.0)
+    base = next(item for item in assembled.compacted_offers if item.advertised_saving > 0.0)
     improved = replace(
         base,
         offer_id="improved",
@@ -529,7 +695,7 @@ def test_tight_display_cap_preserves_collision_or_rejects_distinct_anchors() -> 
         frontier_settings=FrontierSettings(maximum_levels=2),
         assembly_settings=MenuAssemblySettings(display_cap=20),
     )
-    base = next(item for item in assembled.offers if item.advertised_saving > 0.0)
+    base = next(item for item in assembled.compacted_offers if item.advertised_saving > 0.0)
     high = replace(
         base,
         offer_id="high",
@@ -544,9 +710,9 @@ def test_tight_display_cap_preserves_collision_or_rejects_distinct_anchors() -> 
         charging_cost=base.same_target_bau_cost - 10.0,
         charging_health_score=10.0,
     )
-    with pytest.raises(PhysicalConstraintError, match="mandatory anchors"):
-        assembly_module._select_displayed((high, low), set(), 1)
-    bau = next(item for item in assembled.offers if item.advertised_saving == 0.0)
+    selected = assembly_module._select_displayed((high, low), set(), 1)
+    assert [item.offer_id for item in selected] == ["low"]
+    bau = next(item for item in assembled.bau_reference_offers if item.advertised_saving == 0.0)
     collision = replace(
         base,
         offer_id="collision",
@@ -578,9 +744,136 @@ def test_no_charge_target_is_bau_only() -> None:
         generated_menu=no_charge,
         assembly_settings=MenuAssemblySettings(display_cap=2),
     )
-    assert len(assembled.offers) == 1
-    assert assembled.offers[0].advertised_saving == 0.0
+    assert not assembled.offers
+    assert len(assembled.bau_reference_offers) == 1
+    assert assembled.bau_reference_offers[0].advertised_saving == 0.0
     assert not assembled.source_frontiers
+
+
+def test_paper_filtering_pipeline_preserves_generated_snapshot_and_exposes_counts() -> None:
+    ev, session, signal, menu = _generated()
+    assembled = assemble_customer_menu(
+        ev=ev,
+        session=session,
+        signal=signal,
+        generated_menu=menu,
+        frontier_settings=FrontierSettings(maximum_levels=3),
+        assembly_settings=MenuAssemblySettings(delta_saving_merge=5.0),
+    )
+    assert assembled.menu_stage == "displayed"
+    assert assembled.generated_offer_count == len(assembled.generated_offers)
+    assert len(assembled.generated_offers) == assembled.pipeline_diagnostics.generated_offer_count
+    assert len(assembled.retained_offers) == assembled.pipeline_diagnostics.retained_offer_count
+    assert len(assembled.compacted_offers) == assembled.pipeline_diagnostics.compacted_offer_count
+    assert len(assembled.pareto_offers) == assembled.pipeline_diagnostics.pareto_offer_count
+    assert len(assembled.offers) == assembled.pipeline_diagnostics.displayed_offer_count
+    generated_by_id = {offer.offer_id: offer for offer in assembled.generated_offers}
+    assert all(
+        generated_by_id[offer.offer_id].profile == offer.profile
+        for offer in assembled.retained_offers
+    )
+    assert all(offer.offer_id in generated_by_id for offer in assembled.compacted_offers)
+    assert assembled.pipeline_diagnostics.compaction_removed_count == (
+        len(assembled.retained_offers) - len(assembled.compacted_offers)
+    )
+
+
+def test_compaction_uses_actual_saving_and_does_not_cross_requests() -> None:
+    ev, session, signal, menu = _generated()
+    assembled = assemble_customer_menu(
+        ev=ev,
+        session=session,
+        signal=signal,
+        generated_menu=menu,
+        frontier_settings=FrontierSettings(maximum_levels=2),
+        assembly_settings=MenuAssemblySettings(delta_saving_merge=5.0),
+    )
+    base = next(offer for offer in assembled.compacted_offers if offer.advertised_saving > 0.0)
+    source = assembled.compacted_metadata[assembled.compacted_offers.index(base)]
+    source_by_id = {source.offer_id: source}
+    same_group = tuple(
+        replace(
+            base,
+            offer_id=f"compact-{index}",
+            advertised_saving=saving,
+            charging_cost=base.same_target_bau_cost - saving,
+            raw_battery_stress=stress,
+            provenance_flags=("is_intermediate",),
+            scientific_role="intermediate",
+        )
+        for index, (saving, stress) in enumerate(((1.0, 4.0), (4.0, 1.0), (8.0, 3.0)))
+    )
+    other_request = replace(
+        same_group[0],
+        offer_id="compact-other-request",
+        ready_boundary_absolute_minute=(base.ready_boundary_absolute_minute or base.ready_step) + 1,
+    )
+    other_target = replace(
+        same_group[0],
+        offer_id="compact-other-target",
+        target_soc=same_group[0].target_soc + 0.1,
+    )
+    all_offers = same_group + (other_request, other_target)
+    source_by_id = {
+        offer.offer_id: replace(source, offer_id=offer.offer_id) for offer in all_offers
+    }
+    compacted, groups, _decisions = assembly_module._compact_offer_stages(
+        all_offers,
+        source_by_id,
+        delta_saving_merge=5.0,
+        numerical_tolerance=1e-8,
+        endpoint_tolerance=1e-8,
+    )
+    ids = {offer.offer_id for offer in compacted}
+    assert "compact-other-request" in ids
+    assert "compact-other-target" in ids
+    assert "compact-2" in ids  # true maximum endpoint is preserved
+    assert "compact-1" in ids  # lower raw stress wins the first bucket
+    assert "compact-0" not in ids
+    assert groups[0].input_offer_count == 3
+
+
+def test_pareto_uses_absolute_ready_target_saving_and_raw_stress() -> None:
+    ev, session, signal, menu = _generated()
+    assembled = assemble_customer_menu(
+        ev=ev,
+        session=session,
+        signal=signal,
+        generated_menu=menu,
+        frontier_settings=FrontierSettings(maximum_levels=2),
+    )
+    base = next(offer for offer in assembled.compacted_offers if offer.advertised_saving > 0.0)
+    source = assembled.compacted_metadata[assembled.compacted_offers.index(base)]
+    offers = tuple(
+        replace(
+            base,
+            offer_id=offer_id,
+            ready_boundary_absolute_minute=ready,
+            target_battery_energy_kwh=target_energy,
+            target_soc=target_energy / 60.0,
+            advertised_saving=saving,
+            charging_cost=base.same_target_bau_cost - saving,
+            raw_battery_stress=stress,
+        )
+        for offer_id, ready, target_energy, saving, stress in (
+            ("pareto-a", 10, 30.0, 5.0, 2.0),
+            ("pareto-b", 11, 29.0, 4.0, 3.0),
+            ("pareto-c", 10, 30.0, 6.0, 1.0),
+        )
+    )
+    source_by_id = {offer.offer_id: replace(source, offer_id=offer.offer_id) for offer in offers}
+    efficient, anchors, pairs = assembly_module._pareto_offer_stages(
+        offers,
+        source_by_id,
+        saving_tolerance=1e-8,
+        target_energy_tolerance=1e-8,
+        battery_stress_tolerance=1e-8,
+        ready_tolerance_minutes=0,
+    )
+    assert {offer.offer_id for offer in efficient} == {"pareto-c"}
+    assert not anchors
+    assert ("pareto-c", "pareto-a") in pairs
+    assert ("pareto-c", "pareto-b") in pairs
 
 
 def test_assembled_menu_rejects_missing_bau_and_preserves_snapshots() -> None:

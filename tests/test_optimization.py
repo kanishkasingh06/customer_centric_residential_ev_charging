@@ -17,6 +17,7 @@ from evmenu.optimization import (
     build_least_degradation_profile,
     build_sandwich_saving_frontier,
     build_saving_constrained_profile,
+    select_saving_levels,
 )
 from evmenu.schemas import ChargingSession, EVSpec, PlanningSignal
 
@@ -47,6 +48,30 @@ def _signal() -> PlanningSignal:
         timestep_hours=1.0,
         price_per_kwh=(10.0, 9.0, 8.0, 2.0, 1.0, 3.0),
         battery_temperature_c=(30.0,) * 6,
+    )
+
+
+@pytest.mark.parametrize(
+    ("maximum", "step", "levels", "expected"),
+    [
+        (2.0, 5.0, 5, (2.0,)),
+        (12.0, 5.0, 5, (5.0, 10.0, 12.0)),
+        (20.0, 5.0, 5, (5.0, 10.0, 15.0, 20.0)),
+        (40.0, 5.0, 4, (5.0, 15.0, 30.0, 40.0)),
+        (40.0, 5.0, 1, (40.0,)),
+    ],
+)
+def test_select_saving_levels_is_value_spaced_and_endpoint_preserving(
+    maximum: float, step: float, levels: int, expected: tuple[float, ...]
+) -> None:
+    assert (
+        select_saving_levels(
+            maximum_saving=maximum,
+            saving_step=step,
+            maximum_levels=levels,
+            zero_tolerance=1e-8,
+        )
+        == expected
     )
 
 
@@ -630,7 +655,7 @@ def test_malformed_successful_solver_vectors_are_rejected(
         )
 
 
-def test_frontier_collapses_exact_endpoints_and_assigns_unique_roles() -> None:
+def test_frontier_preserves_value_spaced_levels_and_endpoint_roles() -> None:
     ev, session, signal, candidate = _flexible_case(
         prices=(10.0, 9.0, 8.0, 2.0, 1.0, 3.0), charger_power_kw=4.0
     )
@@ -641,9 +666,9 @@ def test_frontier_collapses_exact_endpoints_and_assigns_unique_roles() -> None:
         candidate=candidate,
         bau_cost=candidate.same_target_bau_cost,
     )
-    assert len(frontier.points) == 1
-    assert frontier.points[0].endpoint_role == "least_and_maximum"
-    assert frontier.points[0].point_id == frontier.points[0].assessment.candidate_id
+    assert len(frontier.points) >= 2
+    assert frontier.points[-1].endpoint_role in ("maximum_saving", "least_and_maximum")
+    assert all(point.point_id == point.assessment.candidate_id for point in frontier.points)
 
 
 def test_frontier_direct_validation_rejects_malformed_identity() -> None:

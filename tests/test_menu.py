@@ -87,34 +87,38 @@ def test_savings_use_same_target_bau() -> None:
         )
 
 
-def test_deduplication_keeps_earliest_ready_for_identical_profile() -> None:
+def test_request_enumeration_keeps_identical_profiles_until_scientific_generation() -> None:
     menu = generate_candidate_menu(
         ev=ev(),
         session=session(initial=30.0),
         signal=signal((10.0, 1.0, 5.0, 6.0, 7.0, 8.0)),
     )
-    for target in {candidate.target_soc for candidate in menu.candidates}:
-        profiles: dict[tuple[float, ...], int] = {}
-        for candidate in menu.candidates_for_target(target):
-            if candidate.kind != "minimum_cost":
-                continue
-            key = candidate.profile.grid_energy_kwh
-            assert key not in profiles
-            profiles[key] = candidate.ready_step
+    assert menu.diagnostics.request_count_total > len(menu.candidates)
+    assert any(
+        sum(
+            candidate.profile.grid_energy_kwh == other.profile.grid_energy_kwh
+            for other in menu.candidates
+            if other.kind == "minimum_cost"
+        )
+        > 1
+        for candidate in menu.candidates
+        if candidate.kind == "minimum_cost"
+    )
 
 
-def test_deduplication_can_be_disabled() -> None:
+def test_legacy_deduplication_can_be_requested_explicitly() -> None:
     menu = generate_candidate_menu(
         ev=ev(),
         session=session(initial=30.0),
         signal=signal((10.0, 1.0, 5.0, 6.0, 7.0, 8.0)),
         generation_settings=MenuGenerationSettings(deduplicate_identical_profiles=False),
     )
-    assert len(menu.candidates) > len(
+    assert len(menu.candidates) >= len(
         generate_candidate_menu(
             ev=ev(),
             session=session(initial=30.0),
             signal=signal((10.0, 1.0, 5.0, 6.0, 7.0, 8.0)),
+            generation_settings=MenuGenerationSettings(deduplicate_identical_profiles=True),
         ).candidates
     )
 
@@ -126,11 +130,11 @@ def test_no_charge_session_produces_only_nonduplicated_bau_per_target() -> None:
         signal=signal((5.0,) * 6),
     )
     assert all(sum(candidate.profile.grid_energy_kwh) == 0.0 for candidate in menu.candidates)
-    assert all(candidate.ready_step == 0 for candidate in menu.candidates)
+    assert {candidate.ready_step for candidate in menu.candidates} == set(range(7))
     for target in {candidate.target_soc for candidate in menu.candidates}:
         target_candidates = menu.candidates_for_target(target)
         assert sum(candidate.kind == "immediate_bau" for candidate in target_candidates) == 1
-        assert sum(candidate.kind == "minimum_cost" for candidate in target_candidates) == 1
+        assert sum(candidate.kind == "minimum_cost" for candidate in target_candidates) == 7
 
 
 def test_negative_prices_do_not_create_overcharging() -> None:

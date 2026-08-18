@@ -285,8 +285,11 @@ class PlanningSignal:
                 "interval_start_minutes and interval_end_minutes must be supplied together."
             )
         if starts is None:
-            start_values = tuple(range(expected_length))
-            end_values = tuple(range(1, expected_length + 1))
+            # Boundary fields are absolute minutes, even when callers omit
+            # explicit metadata.  Preserve the declared nominal interval
+            # length instead of silently treating each step as one minute.
+            start_values = tuple(index * nominal_minutes for index in range(expected_length))
+            end_values = tuple((index + 1) * nominal_minutes for index in range(expected_length))
         else:
             if isinstance(starts, (str, bytes)) or not isinstance(starts, Sequence):
                 raise SignalValidationError(
@@ -472,6 +475,70 @@ class MenuOffer:
     annualized_degradation_pct: float
     charging_health_score: float
     profile: ChargingProfile
+    # ``charging_health_score`` is retained as a compatibility field for
+    # earlier commits.  Scientific consumers must use the absolute stress
+    # value below; it is never normalized against the current menu.
+    raw_battery_stress: float | None = None
+    estimated_capacity_loss: float | None = None
+    estimated_rul_years: float | None = None
+    requested_saving: float | None = None
+    saving_band_lower: float | None = None
+    saving_band_upper: float | None = None
+    saving_band_violation: float = 0.0
+    battery_metric_model_id: str = "semi_empirical_total_fade_v1"
+    battery_metric_comparison_scope: str = "same EV model and degradation parameterization"
+    # Canonical degradation provenance and decomposition.  The two
+    # ``battery_metric_*`` fields above are retained as compatibility aliases
+    # for earlier commits; scientific consumers should use these fields.
+    degradation_model_id: str | None = None
+    degradation_model_version: str = "1"
+    parameter_set_id: str | None = None
+    parameter_status: str = "legacy_compatibility"
+    battery_chemistry: Chemistry | None = None
+    calendar_capacity_fade: float | None = None
+    cycle_capacity_fade: float | None = None
+    total_capacity_fade: float | None = None
+    capacity_fade_percent: float | None = None
+    calendar_fade_connected_window: float | None = None
+    calendar_fade_parked_period: float | None = None
+    battery_temperature_c: float | None = None
+    battery_age_years: float | None = None
+    accumulated_fec_at_start: float | None = None
+    effective_fec_at_start: float | None = None
+    minimum_effective_fec: float | None = None
+    fec_regularization_applied: bool = False
+    fec_regularization_source: str = "DegradationSettings.minimum_effective_fec"
+    parked_period_hours: float | None = None
+    parked_period_source: str = "deferred_not_modeled"
+    calendar_scope: str = "connected_window_only"
+    temperature_source: str = "planning_signal_or_assumed_default"
+    battery_age_source: str = "degradation_settings"
+    accumulated_fec_source: str = "degradation_settings"
+    provenance_flags: tuple[str, ...] = ()
+    ready_boundary_absolute_minute: int | None = None
+    target_battery_energy_kwh: float | None = None
+    scientific_role: str | None = None
+    # These flags describe derived customer-facing pipeline stages.  They are
+    # deliberately false on the immutable rich generated snapshot and are set
+    # only on derived copies returned by compaction/Pareto stages.
+    is_pareto_efficient: bool = False
+    is_preserved_bau_anchor: bool = False
+    is_selected_bau_anchor: bool = False
+    is_selected_maximum_saving: bool = False
+    is_selected_least_degradation: bool = False
+    is_selected_intermediate: bool = False
+    selection_reason: str | None = None
+    selection_rank_within_target: int | None = None
+    diversity_score: float | None = None
+
+    @property
+    def battery_stress(self) -> float:
+        """Deprecated compatibility alias for ``total_capacity_fade``."""
+        return float(
+            self.total_capacity_fade
+            if self.total_capacity_fade is not None
+            else self.raw_battery_stress or 0.0
+        )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "offer_id", _canonical_text("offer_id", self.offer_id))
@@ -500,6 +567,183 @@ class MenuOffer:
             raise SchemaValidationError("charging_health_score must lie in [0, 100].")
         if not isinstance(self.profile, ChargingProfile):
             raise SchemaValidationError("profile must be a ChargingProfile instance.")
+        stress = (
+            self.incremental_degradation
+            if self.raw_battery_stress is None
+            else self.raw_battery_stress
+        )
+        _require_nonnegative("raw_battery_stress", stress)
+        object.__setattr__(self, "raw_battery_stress", float(stress))
+        optional_values: tuple[tuple[str, float | None], ...] = (
+            ("estimated_capacity_loss", self.estimated_capacity_loss),
+            ("estimated_rul_years", self.estimated_rul_years),
+            ("requested_saving", self.requested_saving),
+            ("saving_band_lower", self.saving_band_lower),
+            ("saving_band_upper", self.saving_band_upper),
+        )
+        for optional_name, optional_value in optional_values:
+            name = optional_name
+            numeric_value: float | None = optional_value
+            if numeric_value is not None:
+                _require_finite(name, numeric_value)
+                if name != "requested_saving" and numeric_value < 0.0:
+                    raise PhysicalConstraintError(f"{name} must be non-negative.")
+        _require_nonnegative("saving_band_violation", self.saving_band_violation)
+        if (self.saving_band_lower is None) != (self.saving_band_upper is None):
+            raise SchemaValidationError(
+                "saving_band_lower and saving_band_upper must be supplied together."
+            )
+        if (
+            self.saving_band_lower is not None
+            and self.saving_band_upper is not None
+            and self.saving_band_lower > self.saving_band_upper
+        ):
+            raise SchemaValidationError("saving band lower bound cannot exceed upper bound.")
+        for metadata_name, metadata_value in (
+            ("battery_metric_model_id", self.battery_metric_model_id),
+            ("battery_metric_comparison_scope", self.battery_metric_comparison_scope),
+            ("degradation_model_version", self.degradation_model_version),
+            ("parameter_status", self.parameter_status),
+            ("calendar_scope", self.calendar_scope),
+            ("temperature_source", self.temperature_source),
+            ("battery_age_source", self.battery_age_source),
+            ("accumulated_fec_source", self.accumulated_fec_source),
+            ("fec_regularization_source", self.fec_regularization_source),
+            ("parked_period_source", self.parked_period_source),
+        ):
+            if not isinstance(metadata_value, str) or not metadata_value.strip():
+                raise SchemaValidationError(f"{metadata_name} must be a non-empty string.")
+            object.__setattr__(self, metadata_name, metadata_value.strip())
+        model_id = (
+            self.battery_metric_model_id
+            if self.degradation_model_id is None
+            else self.degradation_model_id
+        )
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise SchemaValidationError("degradation_model_id must be a non-empty string.")
+        object.__setattr__(self, "degradation_model_id", model_id.strip())
+        if not isinstance(self.fec_regularization_applied, bool):
+            raise SchemaValidationError("fec_regularization_applied must be bool.")
+        if self.parameter_set_id is not None:
+            if not isinstance(self.parameter_set_id, str) or not self.parameter_set_id.strip():
+                raise SchemaValidationError("parameter_set_id must be non-empty when supplied.")
+            object.__setattr__(self, "parameter_set_id", self.parameter_set_id.strip())
+        if self.battery_chemistry is not None and self.battery_chemistry not in ("LFP", "NMC"):
+            raise SchemaValidationError("battery_chemistry must be 'LFP' or 'NMC'.")
+        optional_fade_values: tuple[tuple[str, float | None], ...] = (
+            ("calendar_capacity_fade", self.calendar_capacity_fade),
+            ("cycle_capacity_fade", self.cycle_capacity_fade),
+            ("total_capacity_fade", self.total_capacity_fade),
+            ("capacity_fade_percent", self.capacity_fade_percent),
+            ("calendar_fade_connected_window", self.calendar_fade_connected_window),
+            ("calendar_fade_parked_period", self.calendar_fade_parked_period),
+            ("battery_temperature_c", self.battery_temperature_c),
+            ("battery_age_years", self.battery_age_years),
+            ("accumulated_fec_at_start", self.accumulated_fec_at_start),
+            ("effective_fec_at_start", self.effective_fec_at_start),
+            ("minimum_effective_fec", self.minimum_effective_fec),
+            ("parked_period_hours", self.parked_period_hours),
+        )
+        for fade_name, fade_value in optional_fade_values:
+            if fade_value is not None:
+                _require_finite(fade_name, fade_value)
+                if fade_name not in ("battery_temperature_c",) and fade_value < 0.0:
+                    raise PhysicalConstraintError(f"{fade_name} must be non-negative.")
+        total_fade = (
+            self.incremental_degradation
+            if self.total_capacity_fade is None
+            else self.total_capacity_fade
+        )
+        object.__setattr__(self, "total_capacity_fade", float(total_fade))
+        object.__setattr__(self, "capacity_fade_percent", float(total_fade * 100.0))
+        if (
+            self.calendar_fade_parked_period is not None
+            and self.calendar_fade_connected_window is not None
+        ):
+            calendar = self.calendar_fade_connected_window + self.calendar_fade_parked_period
+            if (
+                self.calendar_capacity_fade is not None
+                and abs(calendar - self.calendar_capacity_fade) > 1e-12
+            ):
+                raise PhysicalConstraintError("calendar_capacity_fade must equal its components.")
+            object.__setattr__(self, "calendar_capacity_fade", float(calendar))
+        if (
+            self.cycle_capacity_fade is not None
+            and self.calendar_capacity_fade is not None
+            and abs(self.calendar_capacity_fade + self.cycle_capacity_fade - total_fade) > 1e-12
+        ):
+            raise PhysicalConstraintError(
+                "total_capacity_fade must equal calendar plus cycle fade."
+            )
+        flags = tuple(self.provenance_flags)
+        if any(not isinstance(flag, str) or not flag.strip() for flag in flags):
+            raise SchemaValidationError("provenance_flags must contain non-empty strings.")
+        if len(set(flags)) != len(flags):
+            raise SchemaValidationError("provenance_flags must be unique.")
+        object.__setattr__(self, "provenance_flags", tuple(sorted(flags)))
+        if self.ready_boundary_absolute_minute is not None and (
+            isinstance(self.ready_boundary_absolute_minute, bool)
+            or not isinstance(self.ready_boundary_absolute_minute, int)
+        ):
+            raise SchemaValidationError("ready_boundary_absolute_minute must be an integer.")
+        target_energy = (
+            self.target_soc * 0.0
+            if self.target_battery_energy_kwh is None
+            else self.target_battery_energy_kwh
+        )
+        if self.target_battery_energy_kwh is not None:
+            _require_nonnegative("target_battery_energy_kwh", target_energy)
+        if self.scientific_role is not None:
+            if not isinstance(self.scientific_role, str) or not self.scientific_role.strip():
+                raise SchemaValidationError("scientific_role must be non-empty when supplied.")
+            object.__setattr__(self, "scientific_role", self.scientific_role.strip())
+        for name, value in (
+            ("is_pareto_efficient", self.is_pareto_efficient),
+            ("is_preserved_bau_anchor", self.is_preserved_bau_anchor),
+            ("is_selected_bau_anchor", self.is_selected_bau_anchor),
+            ("is_selected_maximum_saving", self.is_selected_maximum_saving),
+            ("is_selected_least_degradation", self.is_selected_least_degradation),
+            ("is_selected_intermediate", self.is_selected_intermediate),
+        ):
+            if not isinstance(value, bool):
+                raise SchemaValidationError(f"{name} must be bool.")
+        if self.selection_reason is not None:
+            if not isinstance(self.selection_reason, str) or not self.selection_reason.strip():
+                raise SchemaValidationError("selection_reason must be non-empty when supplied.")
+            allowed_reasons = {
+                "bau_anchor",
+                "target_maximum_saving",
+                "target_least_degradation",
+                "intermediate_diversity",
+                "close_ready_saving_stress_tradeoff",
+                "target_positive_saving_coverage",
+                "per_target_limit",
+                "global_limit",
+                "too_close_in_ready_time",
+                "insufficient_saving_difference",
+                "insufficient_stress_difference",
+                "lower_diversity_contribution",
+                "target_coverage_anchor",
+                "maximum_saving_anchor",
+                "least_degradation_anchor",
+                "farthest_point_diversity",
+                "anchor_suppressed_similarity",
+            }
+            if self.selection_reason not in allowed_reasons:
+                raise SchemaValidationError("unsupported selection_reason.")
+            object.__setattr__(self, "selection_reason", self.selection_reason.strip())
+        if self.selection_rank_within_target is not None and (
+            isinstance(self.selection_rank_within_target, bool)
+            or not isinstance(self.selection_rank_within_target, int)
+            or self.selection_rank_within_target < 1
+        ):
+            raise SchemaValidationError(
+                "selection_rank_within_target must be a positive integer when supplied."
+            )
+        if self.diversity_score is not None:
+            _require_finite("diversity_score", self.diversity_score)
+            if self.diversity_score < 0.0:
+                raise PhysicalConstraintError("diversity_score must be non-negative.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,6 +755,12 @@ class MenuSettings:
     numerical_tolerance: float = 1e-8
     equivalent_sessions_per_year: int = 300
     reference_degradation_pct: float = 2.0
+    # Algorithm 1 rich-generation controls.  Keeping these on the immutable
+    # scenario object gives every layer one source of truth for the defaults.
+    saving_step: float = 5.0
+    maximum_saving_levels_per_request: int = 5
+    saving_band_tolerance: float = 0.50
+    saving_zero_tolerance: float | None = None
 
     def __post_init__(self) -> None:
         targets = _freeze_numeric_tuple("standard_targets", self.standard_targets)
@@ -534,3 +784,18 @@ class MenuSettings:
         if self.equivalent_sessions_per_year <= 0:
             raise SchemaValidationError("equivalent_sessions_per_year must be positive.")
         _require_positive("reference_degradation_pct", self.reference_degradation_pct)
+        _require_positive("saving_step", self.saving_step)
+        if isinstance(self.maximum_saving_levels_per_request, bool) or not isinstance(
+            self.maximum_saving_levels_per_request, int
+        ):
+            raise SchemaValidationError("maximum_saving_levels_per_request must be an integer.")
+        if self.maximum_saving_levels_per_request < 1:
+            raise PhysicalConstraintError("maximum_saving_levels_per_request must be positive.")
+        _require_nonnegative("saving_band_tolerance", self.saving_band_tolerance)
+        zero = (
+            self.numerical_tolerance
+            if self.saving_zero_tolerance is None
+            else self.saving_zero_tolerance
+        )
+        _require_nonnegative("saving_zero_tolerance", zero)
+        object.__setattr__(self, "saving_zero_tolerance", float(zero))

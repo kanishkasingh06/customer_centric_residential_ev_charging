@@ -460,7 +460,7 @@ def test_same_target_cycle_fade_is_profile_sensitive_only_to_peak_c_rate() -> No
     assert len({round(item.parked_day_calendar_fade, 16) for item in assessments}) == 1
 
 
-def test_scoring_is_within_menu_quantized_and_order_preserving() -> None:
+def test_scoring_exposes_schedule_intrinsic_stress_without_menu_normalization() -> None:
     vehicle = ev()
     charging_session = session()
     planning_signal = signal()
@@ -469,38 +469,47 @@ def test_scoring_is_within_menu_quantized_and_order_preserving() -> None:
         ev=vehicle, session=charging_session, signal=planning_signal, menu=menu
     )
     assert len(scored.offers) == len(menu.candidates) == len(scored.assessments)
-    scores = [offer.charging_health_score for offer in scored.offers]
-    assert max(scores) == 100.0
-    assert min(scores) == 0.0
-    assert all(score % 5.0 == 0.0 for score in scores)
-    ranked = sorted(
-        zip(scored.assessments, scored.offers, strict=True),
-        key=lambda pair: pair[0].total_fade,
+    assert [offer.raw_battery_stress for offer in scored.offers] == [
+        assessment.total_fade for assessment in scored.assessments
+    ]
+    assert all(offer.raw_battery_stress is not None for offer in scored.offers)
+    assert all(float(offer.raw_battery_stress or 0.0) < 1.0 for offer in scored.offers)
+
+
+def test_zero_fec_regularization_is_explicit_and_exposed() -> None:
+    vehicle, charging_session, planning_signal, candidate = direct_zero_charge_candidate(
+        chemistry="LFP", soc=0.8
     )
-    assert [offer.charging_health_score for _, offer in ranked] == sorted(
-        (offer.charging_health_score for _, offer in ranked), reverse=True
+    result = assess_candidate_degradation(
+        ev=vehicle,
+        session=charging_session,
+        signal=planning_signal,
+        candidate=candidate,
+        degradation_settings=DegradationSettings(cumulative_equivalent_full_cycles=0.0),
     )
+    assert result.accumulated_fec_at_start == 0.0
+    assert result.minimum_effective_fec == 1.0
+    assert result.effective_fec_at_start == 1.0
+    assert result.fec_regularization_applied is True
+    assert result.fec_regularization_source == "DegradationSettings.minimum_effective_fec"
 
 
-@pytest.mark.parametrize(
-    ("raw_health", "expected"),
-    ((0.0, 0.0), (2.4, 0.0), (2.5, 5.0), (7.5, 10.0), (97.5, 100.0), (100.0, 100.0)),
-)
-def test_health_quantization_is_explicit_half_up(
-    raw_health: float,
-    expected: float,
-) -> None:
-    fade = 1.0 - raw_health / 100.0
-    assert degradation_module._health_score(fade, 0.0, 1.0, 5.0, 0.0) == expected
+def test_positive_fec_does_not_use_regularization_floor() -> None:
+    vehicle, charging_session, planning_signal, candidate = direct_zero_charge_candidate(
+        chemistry="LFP", soc=0.8
+    )
+    result = assess_candidate_degradation(
+        ev=vehicle,
+        session=charging_session,
+        signal=planning_signal,
+        candidate=candidate,
+        degradation_settings=DegradationSettings(cumulative_equivalent_full_cycles=3.0),
+    )
+    assert result.effective_fec_at_start == 3.0
+    assert result.fec_regularization_applied is False
 
 
-def test_tiny_health_spread_receives_equal_health() -> None:
-    assert degradation_module._health_score(1.0, 1.0, 1.0 + 1e-13, 5.0, 1e-12) == 100.0
-    assert degradation_module._health_score(1.0, 1.0, 1.0 + 1e-8, 5.0, 1e-12) == 100.0
-    assert degradation_module._health_score(1.0 + 1e-8, 1.0, 1.0 + 1e-8, 5.0, 1e-12) == 0.0
-
-
-def test_all_equal_fades_receive_health_100() -> None:
+def test_all_equal_fades_keep_the_same_absolute_stress() -> None:
     vehicle = ev("LFP")
     charging_session = ChargingSession(
         arrival_step=0,
@@ -514,7 +523,7 @@ def test_all_equal_fades_receive_health_100() -> None:
     scored = score_generated_menu(
         ev=vehicle, session=charging_session, signal=planning_signal, menu=menu
     )
-    assert all(offer.charging_health_score == 100.0 for offer in scored.offers)
+    assert len({offer.raw_battery_stress for offer in scored.offers}) == 1
 
 
 def test_offer_metadata_is_preserved() -> None:
@@ -547,6 +556,8 @@ def test_invalid_model_parameters_are_rejected() -> None:
         DegradationSettings(reference_age_years=0.0)
     with pytest.raises(PhysicalConstraintError):
         DegradationSettings(minimum_reference_fec=0.0)
+    with pytest.raises(PhysicalConstraintError):
+        DegradationSettings(minimum_effective_fec=0.0)
     with pytest.raises(SchemaValidationError):
         DegradationSettings(battery_age_years=float("nan"))
     with pytest.raises(SchemaValidationError):
@@ -723,3 +734,72 @@ def test_unsupported_chemistry_and_stress_parameters_are_rejected() -> None:
         DegradationSettings().parameters_for("unsupported")
     with pytest.raises(SchemaValidationError):
         calendar_soc_stress(0.5, object())  # type: ignore[arg-type]
+
+
+def test_final_model_exposes_absolute_two_term_fade_and_provenance() -> None:
+    vehicle, charging_session, planning_signal, candidate = direct_zero_charge_candidate(
+        chemistry="LFP", soc=0.8
+    )
+    result = assess_candidate_degradation(
+        ev=vehicle,
+        session=charging_session,
+        signal=planning_signal,
+        candidate=candidate,
+        degradation_settings=DegradationSettings(
+            battery_age_years=3.0,
+            cumulative_equivalent_full_cycles=250.0,
+        ),
+    )
+    assert result.degradation_model_id == "naumann_lfp_capacity_fade_anchor_v1"
+    assert result.parameter_set_id == "naumann_lfp_literature_anchor_v1"
+    assert result.parameter_status == "literature_anchor_calibrated"
+    parked = result.calendar_fade_parked_period or 0.0
+    assert result.calendar_capacity_fade == pytest.approx(
+        result.calendar_fade_connected_window + parked
+    )
+    assert result.total_capacity_fade == pytest.approx(
+        result.calendar_capacity_fade + result.cycle_capacity_fade
+    )
+    assert result.capacity_fade_percent == pytest.approx(result.total_capacity_fade * 100.0)
+    assert result.parked_period_hours == 16.0
+    assert result.parked_period_source == "assumed_default"
+
+
+def test_menu_relative_normalization_is_not_an_active_option() -> None:
+    vehicle = ev("NMC")
+    charging_session = session()
+    planning_signal = signal()
+    menu = generate_candidate_menu(ev=vehicle, session=charging_session, signal=planning_signal)
+    with pytest.raises(SchemaValidationError):
+        score_generated_menu(
+            ev=vehicle,
+            session=charging_session,
+            signal=planning_signal,
+            menu=menu,
+            normalize_health=True,
+        )
+
+
+def test_temperature_and_age_are_monotone_without_low_soc_penalty() -> None:
+    low_vehicle, low_session, low_signal, low_candidate = direct_zero_charge_candidate(
+        chemistry="LFP", soc=0.05
+    )
+    high_vehicle, high_session, high_signal, high_candidate = direct_zero_charge_candidate(
+        chemistry="LFP", soc=0.95
+    )
+    low = assess_candidate_degradation(
+        ev=low_vehicle,
+        session=low_session,
+        signal=low_signal,
+        candidate=low_candidate,
+        degradation_settings=DegradationSettings(battery_age_years=1.0),
+    )
+    high = assess_candidate_degradation(
+        ev=high_vehicle,
+        session=high_session,
+        signal=high_signal,
+        candidate=high_candidate,
+        degradation_settings=DegradationSettings(battery_age_years=1.0),
+    )
+    assert high.calendar_fade_connected_window > low.calendar_fade_connected_window
+    assert calendar_soc_stress(0.05, DEFAULT_LFP_PARAMETERS) >= DEFAULT_LFP_PARAMETERS.calendar_a0

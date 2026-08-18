@@ -79,7 +79,7 @@ def test_generate_text_smoke_and_determinism() -> None:
     assert "illustrative research assumptions" in stdout
     assert "Cost(currency)" in stdout
     assert "Ready" in stdout
-    assert "bau" in stdout
+    assert "BAU references:" in stdout
 
 
 def test_parser_errors_return_two_and_use_injected_stderr() -> None:
@@ -208,6 +208,113 @@ def test_generate_json_is_machine_readable_and_schedule_optional() -> None:
     assert len(scheduled["offers"][0]["charging_schedule_kw"]) == 48
 
 
+def test_json_diagnostics_reconcile_requests_and_expose_band_metadata() -> None:
+    code, stdout, stderr = _run(
+        "generate",
+        "--ev-model",
+        "generic_40kwh_lfp",
+        "--arrival",
+        "19:00",
+        "--departure",
+        "07:00",
+        "--current-soc",
+        "35",
+        "--next-trip-km",
+        "45",
+        "--format",
+        "json",
+        "--include-diagnostics",
+    )
+    assert (code, stderr) == (0, "")
+    payload = json.loads(stdout)
+    diagnostics = payload["diagnostics"]
+    assert diagnostics["request_count_total"] == (
+        diagnostics["request_count_feasible"] + diagnostics["request_count_infeasible"]
+    )
+    assert diagnostics["request_count_feasible"] == (
+        diagnostics["request_count_positive_saving"] + diagnostics["request_count_no_saving"]
+    )
+    offer = payload["offers"][0]
+    assert "same_target_bau_cost" in offer
+    assert "battery_metric_model_id" in offer
+    assert "saving_band_violation" in offer
+
+
+def test_pipeline_stage_and_pipeline_arrays_are_exposed_in_json() -> None:
+    common = (
+        "generate",
+        "--ev-model",
+        "generic_40kwh_lfp",
+        "--arrival",
+        "21:07",
+        "--departure",
+        "06:52",
+        "--current-soc",
+        "35",
+        "--next-trip-km",
+        "45",
+        "--menu-stage",
+        "pareto",
+        "--format",
+        "json",
+        "--include-pipeline-stages",
+        "--include-diagnostics",
+        "--include-bau-references",
+        "--include-distinctness-diagnostics",
+    )
+    code, stdout, stderr = _run(*common)
+    assert (code, stderr) == (0, "")
+    payload = json.loads(stdout)
+    assert payload["menu_stage"] == "pareto"
+    assert (
+        payload["pipeline_counts"]["generated_offer_count"]
+        >= payload["pipeline_counts"]["pareto_offer_count"]
+    )
+    assert len(payload["offers"]) == payload["pipeline_counts"]["pareto_offer_count"]
+    assert len(payload["generated_offers"]) == payload["pipeline_counts"]["generated_offer_count"]
+    assert len(payload["pareto_offers"]) == payload["pipeline_counts"]["pareto_offer_count"]
+    assert (
+        len(payload["bau_reference_offers"])
+        == payload["pipeline_counts"]["bau_reference_offer_count"]
+    )
+    assert payload["distinctness_diagnostics"]["option_metrics"]
+    assert all(not offer["is_bau"] for offer in payload["displayed_offers"])
+    assert (
+        len(payload["preserved_bau_anchors"])
+        == payload["pipeline_counts"]["preserved_bau_anchor_count"]
+    )
+    assert all("is_pareto_efficient" in offer for offer in payload["offers"])
+
+
+def test_requested_non_display_stage_keeps_actual_display_stage_separate() -> None:
+    code, stdout, stderr = _run(
+        "generate",
+        "--ev-model",
+        "generic_40kwh_lfp",
+        "--arrival",
+        "21:07",
+        "--departure",
+        "06:52",
+        "--current-soc",
+        "35",
+        "--next-trip-km",
+        "45",
+        "--menu-stage",
+        "generated",
+        "--display-cap",
+        "8",
+        "--format",
+        "json",
+        "--include-pipeline-stages",
+    )
+    assert (code, stderr) == (0, "")
+    payload = json.loads(stdout)
+    assert payload["menu_stage"] == "generated"
+    assert len(payload["offers"]) == payload["pipeline_counts"]["generated_offer_count"]
+    assert len(payload["displayed_offers"]) == 8
+    assert payload["pipeline_counts"]["displayed_offer_count"] == 8
+
+
 def test_generate_supports_flat_negative_price_and_30_minute_steps() -> None:
     code, stdout, stderr = _run(
         "generate",
@@ -227,6 +334,8 @@ def test_generate_supports_flat_negative_price_and_30_minute_steps() -> None:
         "-1.5",
         "--timestep-minutes",
         "30",
+        "--menu-stage",
+        "generated",
         "--format",
         "json",
         "--include-schedule",
@@ -258,7 +367,7 @@ def test_domain_error_uses_stderr_and_exit_code_two() -> None:
     assert "Unknown ev_model" in stderr
 
 
-def test_impossible_display_cap_is_reported() -> None:
+def test_display_cap_below_bau_count_is_still_valid() -> None:
     code, stdout, stderr = _run(
         "generate",
         "--ev-model",
@@ -274,9 +383,10 @@ def test_impossible_display_cap_is_reported() -> None:
         "--display-cap",
         "1",
     )
-    assert code == 2
-    assert stdout == ""
-    assert "display_cap" in stderr
+    assert code == 0
+    assert stderr == ""
+    assert "Customer options: 1 non-BAU" in stdout
+    assert "BAU references:" in stdout
 
 
 @pytest.mark.parametrize("value", ["-1", "101", "nan", "inf"])
@@ -347,6 +457,69 @@ def test_arbitrary_times_and_interval_metadata_are_json_auditable() -> None:
     assert payload["intervals"][-1]["duration_minutes"] == 7
     assert payload["intervals"][0]["start_time"] == "11:07"
     assert payload["intervals"][-1]["end_time"] == "18:52"
+
+
+def _text_offer_rows(output: str) -> list[tuple[str, float, str]]:
+    rows: list[tuple[str, float, str]] = []
+    for line in output.splitlines():
+        fields = line.split()
+        if fields and fields[0].isdigit() and len(fields) >= 7:
+            # The final column is the diversity-selection reason; Role is the
+            # field immediately before it.  Keep this parser explicit because
+            # the customer-facing table now exposes both values.
+            rows.append((fields[1], float(fields[2].rstrip("%")), fields[-2]))
+    return rows
+
+
+def test_text_and_json_use_the_same_chronological_offer_order() -> None:
+    common = (
+        "generate",
+        "--ev-model",
+        "generic_40kwh_lfp",
+        "--arrival",
+        "21:07",
+        "--departure",
+        "06:52",
+        "--current-soc",
+        "35",
+        "--next-trip-km",
+        "45",
+    )
+    text_code, text_output, text_error = _run(*common)
+    json_code, json_output, json_error = _run(*common, "--format", "json")
+    repeat_json = _run(*common, "--format", "json")
+    assert (text_code, text_error) == (0, "")
+    assert (json_code, json_error) == (0, "")
+    assert repeat_json == (json_code, json_output, json_error)
+    text_rows = _text_offer_rows(text_output)
+    json_rows = json.loads(json_output)["offers"]
+    assert [(ready, round(target, 1), role) for ready, target, role in text_rows] == [
+        (row["ready_time"], round(row["target_soc_percent"], 1), row["role"]) for row in json_rows
+    ]
+    assert text_rows[0][0] == json_rows[0]["ready_time"]
+    assert any(row[0] == "00:00" for row in text_rows)
+
+
+def test_chronological_sort_preserves_display_cap_offer_set() -> None:
+    menu_code, output, error = _run(
+        "generate",
+        "--ev-model",
+        "generic_40kwh_lfp",
+        "--arrival",
+        "21:07",
+        "--departure",
+        "06:52",
+        "--current-soc",
+        "35",
+        "--next-trip-km",
+        "45",
+        "--display-cap",
+        "8",
+        "--format",
+        "json",
+    )
+    assert (menu_code, error) == (0, "")
+    assert len(json.loads(output)["offers"]) == 8
 
 
 def test_custom_hourly_csv_is_accepted_and_options_are_validated(tmp_path: Path) -> None:
