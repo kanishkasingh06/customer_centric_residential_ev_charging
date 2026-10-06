@@ -68,6 +68,25 @@ SelectionReason = Literal[
 _TupleItem = TypeVar("_TupleItem")
 
 
+def _saving_band_lower(requested_saving: float, band: float) -> float:
+    """Lower edge of an offer's saving band, floored at zero.
+
+    The band is +/- ``band`` around the saving that was requested of the
+    optimizer. When the requested saving is smaller than the band -- which
+    ``select_saving_levels`` produces routinely, because it always includes the
+    exact maximum saving however small that is -- the raw lower edge goes
+    negative. ``MenuOffer`` rejects a negative ``saving_band_lower`` with a
+    ``PhysicalConstraintError``, which aborted the ENTIRE menu over one offer.
+
+    Flooring at zero is the physically correct edge, not a workaround: a non-BAU
+    offer is only retained when its saving is positive, so no realizable saving
+    lies below zero and the unreachable part of the band carries no information.
+    The violation metric uses this same floored edge so the reported bound and
+    the violation measured against it stay consistent.
+    """
+    return max(0.0, requested_saving - band)
+
+
 def _flags_for_role(role: str) -> tuple[str, ...]:
     """Canonical provenance flags shared by assembly and serialization."""
     flags = {"is_bau"} if role == "bau" else set()
@@ -1560,8 +1579,10 @@ def assemble_customer_menu(
                 None
                 if source_by_candidate_id[offer.offer_id].source_kind == "bau"
                 or not source_by_candidate_id[offer.offer_id].saving_provenance
-                else source_by_candidate_id[offer.offer_id].saving_provenance[0]
-                - fsettings.effective_saving_band
+                else _saving_band_lower(
+                    source_by_candidate_id[offer.offer_id].saving_provenance[0],
+                    fsettings.effective_saving_band,
+                )
             ),
             saving_band_upper=(
                 None
@@ -1576,9 +1597,9 @@ def assemble_customer_menu(
                 or not source_by_candidate_id[offer.offer_id].saving_provenance
                 else max(
                     0.0,
-                    (
-                        source_by_candidate_id[offer.offer_id].saving_provenance[0]
-                        - fsettings.effective_saving_band
+                    _saving_band_lower(
+                        source_by_candidate_id[offer.offer_id].saving_provenance[0],
+                        fsettings.effective_saving_band,
                     )
                     - offer.advertised_saving,
                     offer.advertised_saving

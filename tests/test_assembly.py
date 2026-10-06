@@ -9,6 +9,7 @@ import pytest
 import evmenu.assembly as assembly_module
 from evmenu import (
     AssembledMenu,
+    ChargingProfile,
     ChargingSession,
     DegradationSettings,
     DisplayDiversityParameters,
@@ -903,3 +904,97 @@ def test_assembled_menu_rejects_missing_bau_and_preserves_snapshots() -> None:
             source_metadata=tuple(item[2] for item in kept),
         )
     assert menu == original_menu
+
+
+def test_saving_band_lower_is_floored_at_zero() -> None:
+    """A requested saving below the band width must not produce a negative edge.
+
+    ``select_saving_levels`` always includes the exact maximum saving, however
+    small. When that maximum is below the +/- band, the raw lower edge
+    ``requested - band`` goes negative, and ``MenuOffer`` rejects a negative
+    ``saving_band_lower`` with a ``PhysicalConstraintError`` -- which aborted the
+    whole menu over a single offer. Measured on e4bea57, that refused roughly an
+    eighth of sampled requests outright.
+    """
+    band = 0.50
+
+    # The realistic trigger: a maximum-saving point worth less than the band.
+    assert assembly_module._saving_band_lower(0.26, band) == 0.0
+    assert assembly_module._saving_band_lower(0.009, band) == 0.0
+    # Unaffected when the requested saving clears the band.
+    assert assembly_module._saving_band_lower(2.0, band) == pytest.approx(1.5)
+    # Never negative, for any requested saving the optimizer can produce.
+    for requested in (0.0, 1e-9, 0.01, 0.2, 0.49999, 0.5, 0.5001, 1.0, 250.0):
+        assert assembly_module._saving_band_lower(requested, band) >= 0.0
+
+    # The floored edge is what MenuOffer accepts; the raw edge is not.
+    with pytest.raises(PhysicalConstraintError):
+        _menu_offer_with_band(lower=0.26 - band, upper=0.26 + band)
+    offer = _menu_offer_with_band(
+        lower=assembly_module._saving_band_lower(0.26, band), upper=0.26 + band
+    )
+    assert offer.saving_band_lower == 0.0
+    # A positive realized saving sits inside the floored band, so no violation.
+    assert offer.saving_band_violation == 0.0
+
+
+def _menu_offer_with_band(*, lower: float, upper: float) -> MenuOffer:
+    """Build a minimal MenuOffer carrying a saving band, for the test above."""
+    profile = ChargingProfile(
+        start_step=0,
+        grid_energy_kwh=(1.0,),
+        battery_energy_kwh=(10.0, 10.9),
+        power_kw=(4.0,),
+        soc=(0.25, 0.2725),
+    )
+    return MenuOffer(
+        offer_id="band-probe",
+        ev_id="ev",
+        target_sources=("standard_80",),
+        ready_step=1,
+        target_soc=0.80,
+        charging_cost=10.0,
+        same_target_bau_cost=10.26,
+        advertised_saving=0.26,
+        incremental_degradation=1e-6,
+        annualized_degradation_pct=0.01,
+        charging_health_score=50.0,
+        raw_battery_stress=1e-6,
+        profile=profile,
+        saving_band_lower=lower,
+        saving_band_upper=upper,
+    )
+
+
+def test_assembly_survives_a_requested_saving_below_the_band() -> None:
+    """A saving smaller than the band must not abort the whole menu.
+
+    This exercises the real assembly path rather than the helper in isolation:
+    with a band wide enough to swallow every achievable saving, every optimized
+    offer's raw lower edge ``requested - band`` is negative. Before the floor,
+    ``MenuOffer`` rejected the first such edge with a ``PhysicalConstraintError``
+    and the entire menu -- BAU anchors included -- was lost.
+    """
+    ev, session, signal, menu = _generated()
+
+    # Band far larger than any saving this session can produce.
+    huge_band = FrontierSettings(maximum_levels=2, saving_band_tolerance=10_000.0)
+    assembled = assemble_customer_menu(
+        ev=ev,
+        session=session,
+        signal=signal,
+        generated_menu=menu,
+        frontier_settings=huge_band,
+    )
+
+    assert assembled.displayed_offers, "menu aborted instead of completing"
+    bands = [
+        offer.saving_band_lower
+        for offer in assembled.generated_offers
+        if offer.saving_band_lower is not None
+    ]
+    assert bands, "no offer carried a saving band, so this exercised nothing"
+    assert min(bands) == 0.0, "the band floor was not applied on the assembly path"
+    assert all(edge >= 0.0 for edge in bands)
+    # Every realized saving still sits inside the floored band, so no violation.
+    assert all(offer.saving_band_violation == 0.0 for offer in assembled.generated_offers)
