@@ -11,6 +11,7 @@ Commit 2's independent physical validator before it is returned.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from math import isfinite
 from numbers import Real
@@ -22,6 +23,64 @@ from .feasibility import (
 )
 from .schemas import ChargingProfile, ChargingSession, EVSpec, PlanningSignal
 from .validation import ValidationReport, ValidationTolerances, validate_charging_profile
+
+# Absolute floor for "this grid energy is already delivered, not still pending".
+# One nanowatt-hour: far below anything physically meaningful.
+_ENERGY_RESIDUE_FLOOR_KWH = 1e-12
+
+# Safety factor on the accumulation bound below. The bound counts only the
+# subtractions in the allocation loop; the quotient in
+# ``required_grid_energy_kwh`` and each interval's capacity are themselves
+# rounded before the loop ever runs. A small constant multiple absorbs those
+# extra sources without the bound ceasing to scale. 4 is a round number, not a
+# derived one. It is NOT what covers the cancellation in
+# ``max(B_0, z*B_max) - B_0`` (up to ~5e-14 kWh); the 1e-12 floor absorbs that.
+_ENERGY_RESIDUE_SAFETY = 4.0
+
+
+def _energy_residue_tolerance(required_energy: float, interval_count: int) -> float:
+    """Largest grid-energy residue that counts as already delivered.
+
+    ``required_grid_energy_kwh`` is a quotient, ``(max(B_0, z*B_max) - B_0)/eta``,
+    and the allocation loop subtracts interval capacities from it one at a time.
+    Each subtraction rounds to at most ``eps * |running total|``, so after ``n``
+    steps the accumulated residue is bounded by roughly
+    ``n * eps * required_energy``. A fixed absolute constant therefore cannot be
+    correct for every grid: the residue grows with both the interval count and
+    the energy, and a 1-minute grid takes 15x more subtractions over a 24-hour
+    horizon than the 15-minute nominal default.
+
+    Scaling with the bound is what makes this guard defensible -- the earlier
+    fixed constant rested on a sampled worst-case residue that two independent
+    searches did not agree on, and sampling cannot bound a quantity that grows
+    with the grid. No measured residue is quoted here on purpose; the guard
+    stands on the bound, not on a sample.
+
+    What it returns stays physically meaningless: at least 1e-12 kWh, about
+    6.4e-11 kWh for a 1439-interval 50 kWh request. Against the 1e-8 kWh
+    battery-side scan in ``degradation`` that leaves 124x-185x of margin across
+    the shipped catalogue, and still ~39x for a 200 kWh request on a 1-minute
+    grid. The ratio falls as the request grows -- these are request energies,
+    not pack sizes, and a large pack charged from empty asks for more than its
+    own capacity -- but the tolerance would not reach 1e-8 until about
+    7,800 kWh. So it opens no new refusals in that band.
+
+    It does not follow that nothing can be refused between the two. An
+    engineered residue above this tolerance but below ~1.1e-8 kWh clears the
+    loop here and still trips the battery-side scan. No natural input is known
+    to land there; the band is narrow, not absent.
+
+    Deliberately NOT ``ValidationTolerances.energy_kwh``: that is a *validation*
+    tolerance a caller may loosen, and routing it into the constructor would let
+    a loosened check silently change what gets built.
+    """
+    if interval_count <= 0 or required_energy <= 0.0:
+        return _ENERGY_RESIDUE_FLOOR_KWH
+    accumulation_bound = (
+        _ENERGY_RESIDUE_SAFETY * interval_count * sys.float_info.epsilon * required_energy
+    )
+    return max(_ENERGY_RESIDUE_FLOOR_KWH, accumulation_bound)
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,14 +296,15 @@ def build_immediate_charging_profile(
     allocation = [0.0] * session_intervals
     remaining = required_energy
     last_used_local: int | None = None
+    completion_tolerance = _energy_residue_tolerance(required_energy, session_intervals)
     for local_index in range(session_intervals):
-        if remaining <= 0.0:
+        if remaining <= completion_tolerance:
             break
         energy = min(capacities[local_index], remaining)
         allocation[local_index] = energy
         remaining -= energy
         last_used_local = local_index
-        if remaining <= 0.0:
+        if remaining <= completion_tolerance:
             remaining = 0.0
             break
 

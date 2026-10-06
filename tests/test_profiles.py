@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sys
 
 import pytest
 
@@ -454,3 +455,115 @@ def test_independent_validator_catches_corrupted_constructed_profile() -> None:
 
     assert ValidationCode.BATTERY_RECURSION in {issue.code for issue in report.issues}
     assert not report.is_valid
+
+
+def _residue_case() -> tuple[EVSpec, ChargingSession, PlanningSignal, float]:
+    """A request whose required grid energy lands exactly on an interval boundary."""
+    ev = EVSpec(
+        ev_id="residue",
+        battery_capacity_kwh=60.0,
+        minimum_energy_kwh=3.0,
+        charger_power_kw=7.2,
+        charging_efficiency=0.9,
+        chemistry="NMC",
+    )
+    session = ChargingSession(
+        arrival_step=0,
+        departure_step=40,
+        initial_energy_kwh=6.0,
+        commute_energy_kwh=5.1,
+        buffer_energy_kwh=6.0,
+    )
+    signal = PlanningSignal(timestep_hours=0.25, price_per_kwh=(5.0,) * 40)
+    # z_min = (3.0 + 5.1 + 6.0) / 60 -> 14.1 kWh delivered -> 9.0 kWh from the
+    # grid, which is exactly five 1.8 kWh intervals.
+    target_soc = (
+        ev.minimum_energy_kwh + session.commute_energy_kwh + session.buffer_energy_kwh
+    ) / ev.battery_capacity_kwh
+    return ev, session, signal, target_soc
+
+
+def test_immediate_profile_ready_step_survives_float_residue() -> None:
+    """A sub-picowatt-hour residue must not advance ready_step a whole step.
+
+    ``required_grid_energy_kwh`` is a quotient, so when the target lands on an
+    interval boundary the repeated subtraction leaves ~1e-15 kWh. Allocating a
+    further interval for that residue pushed ``ready_step`` past the boundary
+    where the battery actually reaches target, and ``degradation`` -- which
+    recomputes the ready step independently -- then rejected the candidate and
+    refused service for a physically feasible request.
+    """
+    ev, session, signal, target_soc = _residue_case()
+    constructed = build_immediate_charging_profile(
+        ev=ev, session=session, signal=signal, target_soc=target_soc
+    )
+
+    terminal = max(session.initial_energy_kwh, target_soc * ev.battery_capacity_kwh)
+    tolerance = ValidationTolerances().energy_kwh
+    first_at_target = next(
+        index
+        for index, energy in enumerate(constructed.profile.battery_energy_kwh)
+        if energy >= terminal - tolerance
+    )
+    assert constructed.ready_step == first_at_target
+    assert constructed.profile.power_kw[first_at_target:] == (0.0,) * (40 - first_at_target)
+
+
+def test_immediate_profile_is_independent_of_validation_tolerance() -> None:
+    """Loosening a validation tolerance must not change what the constructor builds.
+
+    ``ValidationTolerances`` configures the independent *check*. If the
+    construction loop stopped on it, a caller who loosened the check would
+    silently receive a different, under-delivered profile.
+    """
+    ev, session, signal, _ = _residue_case()
+    # Engineered so five full intervals leave a 5e-4 kWh residue: large enough to
+    # fall inside a loosened validation tolerance, far above real float noise.
+    interval_capacity = ev.charger_power_kw * 0.25
+    required = 5 * interval_capacity + 5e-4
+    target_soc = (
+        required * ev.charging_efficiency + session.initial_energy_kwh
+    ) / ev.battery_capacity_kwh
+
+    strict = build_immediate_charging_profile(
+        ev=ev, session=session, signal=signal, target_soc=target_soc,
+        tolerances=ValidationTolerances(energy_kwh=1e-8),
+    )
+    loose = build_immediate_charging_profile(
+        ev=ev, session=session, signal=signal, target_soc=target_soc,
+        tolerances=ValidationTolerances(energy_kwh=1e-3),
+    )
+    assert strict.ready_step == loose.ready_step
+    assert strict.profile.grid_energy_kwh == loose.profile.grid_energy_kwh
+    assert sum(loose.profile.grid_energy_kwh) == pytest.approx(required, abs=1e-12)
+
+
+def test_energy_residue_tolerance_bounds_float_accumulation() -> None:
+    """The completion tolerance must scale with interval count and energy.
+
+    The allocation loop subtracts interval capacities from a quotient one at a
+    time, so the accumulated rounding residue grows with both the number of
+    subtractions and the magnitude. A fixed absolute constant cannot be right
+    for every grid: a 1-minute grid performs ~96x more subtractions than the
+    15-minute nominal default.
+    """
+    tolerance = profiles_module._energy_residue_tolerance
+
+    # Never below the absolute floor, including for degenerate inputs.
+    assert tolerance(0.0, 48) == profiles_module._ENERGY_RESIDUE_FLOOR_KWH
+    assert tolerance(50.0, 0) == profiles_module._ENERGY_RESIDUE_FLOOR_KWH
+    assert tolerance(-1.0, 48) == profiles_module._ENERGY_RESIDUE_FLOOR_KWH
+    assert tolerance(0.5, 48) == profiles_module._ENERGY_RESIDUE_FLOOR_KWH
+
+    # Monotone in both arguments once the floor is cleared.
+    assert tolerance(50.0, 1439) > tolerance(50.0, 48)
+    assert tolerance(120.0, 1439) > tolerance(50.0, 1439)
+
+    # Actually bounds the worst-case accumulation it is derived from.
+    for required, intervals in ((50.0, 1439), (120.0, 1439), (30.0, 720)):
+        bound = intervals * sys.float_info.epsilon * required
+        assert tolerance(required, intervals) >= bound
+
+    # Still physically meaningless: well under a microwatt-hour, and far below
+    # the 1e-8 kWh battery-side scan in degradation that would re-refuse these.
+    assert tolerance(120.0, 1439) < 1e-9
