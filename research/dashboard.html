@@ -1,0 +1,386 @@
+<title>Preference-Driven Feeder Load</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  color-scheme: light;
+  --ground:#f6f7f9; --surface:#ffffff; --surface-2:#f0f2f6;
+  --ink:#101418; --ink-2:#3d4855; --muted:#5a6472; --rule:#e0e5ec; --rule-2:#eef1f5;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100;
+  --accent:#2a78d6;
+  --shadow:0 1px 2px rgba(16,20,24,.05), 0 8px 24px -12px rgba(16,20,24,.14);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --ground:#11141a; --surface:#171b22; --surface-2:#1e232c;
+    --ink:#eef1f5; --ink-2:#c3cad4; --muted:#98a2b3; --rule:#2a313c; --rule-2:#212730;
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
+    --accent:#3987e5;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --ground:#11141a; --surface:#171b22; --surface-2:#1e232c;
+  --ink:#eef1f5; --ink-2:#c3cad4; --muted:#98a2b3; --rule:#2a313c; --rule-2:#212730;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
+  --accent:#3987e5;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1120px; margin:0 auto; padding:40px 24px 72px; display:flex; flex-direction:column; gap:32px}
+
+h1,h2,h3{font-family:Archivo,"IBM Plex Sans",sans-serif; margin:0; text-wrap:balance; letter-spacing:-.015em}
+h1{font-size:clamp(28px,4vw,40px); font-weight:700; line-height:1.1}
+h2{font-size:20px; font-weight:600}
+h3{font-size:15px; font-weight:600}
+p{margin:0}
+.eyebrow{
+  font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; font-weight:500;
+  letter-spacing:.13em; text-transform:uppercase; color:var(--muted);
+}
+.lede{color:var(--ink-2); max-width:66ch; font-size:16.5px}
+.note{color:var(--muted); font-size:13.5px; max-width:72ch}
+
+header{display:flex; flex-direction:column; gap:14px; padding-bottom:4px}
+.config{
+  display:flex; flex-wrap:wrap; gap:0; border:1px solid var(--rule); border-radius:8px;
+  background:var(--surface); overflow:hidden; box-shadow:var(--shadow);
+}
+.config div{padding:10px 16px; border-right:1px solid var(--rule); flex:1 1 auto; min-width:150px}
+.config div:last-child{border-right:none}
+.config dt{font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--muted); margin-bottom:2px}
+.config dd{margin:0; font-size:13.5px; font-weight:500; font-variant-numeric:tabular-nums}
+
+.kpis{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px}
+.kpi{
+  background:var(--surface); border:1px solid var(--rule); border-radius:10px;
+  padding:18px 20px; box-shadow:var(--shadow); display:flex; flex-direction:column; gap:5px;
+}
+.kpi .v{font-family:Archivo,sans-serif; font-size:30px; font-weight:700; line-height:1;
+  font-variant-numeric:tabular-nums; letter-spacing:-.02em}
+.kpi .k{font-size:13px; font-weight:600; color:var(--ink-2)}
+.kpi .d{font-size:12.5px; color:var(--muted); line-height:1.45}
+
+.card{
+  background:var(--surface); border:1px solid var(--rule); border-radius:12px;
+  padding:22px 24px 18px; box-shadow:var(--shadow); display:flex; flex-direction:column; gap:6px;
+}
+.card .sub{color:var(--muted); font-size:13.5px; margin-bottom:8px; max-width:70ch}
+.two-up{display:grid; grid-template-columns:1fr 1fr; gap:20px}
+@media (max-width:820px){ .two-up{grid-template-columns:1fr} }
+
+.legend{display:flex; flex-wrap:wrap; gap:14px; margin:2px 0 10px}
+.legend span{display:inline-flex; align-items:center; gap:6px; font-size:12.5px; color:var(--ink-2)}
+.swatch{width:11px; height:11px; border-radius:3px; flex:none}
+
+.chart{position:relative; width:100%}
+.chart svg{display:block; width:100%; height:auto; overflow:visible}
+.tip{
+  position:absolute; pointer-events:none; opacity:0; transition:opacity .09s;
+  background:var(--surface); border:1px solid var(--rule); border-radius:8px;
+  box-shadow:var(--shadow); padding:9px 11px; font-size:12.5px; min-width:150px; z-index:5;
+}
+.tip .th{font-family:"IBM Plex Mono",monospace; font-weight:500; font-size:11.5px;
+  color:var(--muted); margin-bottom:5px; letter-spacing:.05em}
+.tip .tr{display:flex; align-items:center; gap:7px; justify-content:space-between; line-height:1.6}
+.tip .tl{display:inline-flex; align-items:center; gap:6px; color:var(--ink-2)}
+.tip b{font-variant-numeric:tabular-nums; font-weight:600}
+
+.tbl-scroll{overflow-x:auto; margin:0 -4px}
+table{border-collapse:collapse; width:100%; font-size:13px; min-width:760px}
+th,td{padding:8px 11px; text-align:right; border-bottom:1px solid var(--rule-2); white-space:nowrap}
+th{font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.07em;
+  text-transform:uppercase; color:var(--muted); font-weight:500; border-bottom:1px solid var(--rule)}
+td:first-child,th:first-child,td:nth-child(2),th:nth-child(2){text-align:left}
+td{font-variant-numeric:tabular-nums; color:var(--ink-2)}
+td.name{color:var(--ink); font-weight:500}
+tbody tr:hover{background:var(--surface-2)}
+.chip{display:inline-flex; align-items:center; gap:6px}
+
+ul{margin:0; padding-left:0; list-style:none; display:flex; flex-direction:column; gap:14px}
+li{display:flex; gap:12px; align-items:flex-start}
+.marker{
+  font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:500; color:var(--muted);
+  border:1px solid var(--rule); border-radius:5px; padding:2px 6px; flex:none; margin-top:2px;
+}
+li b{color:var(--ink); font-weight:600}
+li p{color:var(--ink-2); font-size:14.5px}
+
+footer{border-top:1px solid var(--rule); padding-top:20px; display:flex; flex-direction:column; gap:10px}
+code{font-family:"IBM Plex Mono",monospace; font-size:.9em; background:var(--surface-2);
+  padding:1px 5px; border-radius:4px; color:var(--ink-2)}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:3px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">DER Integration Lab &middot; Phase 11 &middot; Mixed-logit choice over generated menus</p>
+  <h1>Who your customers are moves the peak more than how many there are</h1>
+  <p class="lede">Residential EV customers choose from a generated charging menu under a random-utility model.
+  The same 150 vehicles, on the same hourly tariff, produce a feeder peak anywhere from 157&nbsp;kW at 03:00
+  to 362&nbsp;kW at 20:00 depending only on the preference mix of the population.</p>
+  <dl class="config">
+    <div><dt>Tariff</dt><dd>Hourly weekly ToU, fixed</dd></div>
+    <div><dt>Choice model</dt><dd>Mixed logit, lognormal betas</dd></div>
+    <div><dt>Sweep</dt><dd>108 cells &middot; 3 seeds each</dd></div>
+    <div><dt>Menu bank</dt><dd>1,183 generated menus</dd></div>
+    <div><dt>Resolution</dt><dd>15-min nominal, 5-min raster</dd></div>
+  </dl>
+</header>
+
+<section class="kpis">
+  <div class="kpi"><p class="v">2.3&times;</p><p class="k">Peak spread from preferences alone</p>
+    <p class="d">157 kW (cost-driven) to 362 kW (convenience-driven) at fixed fleet size and tariff.</p></div>
+  <div class="kpi"><p class="v">7 h</p><p class="k">Peak timing shift</p>
+    <p class="d">Cost-driven populations peak at 03:00; every other mix peaks at 19:00&ndash;22:00.</p></div>
+  <div class="kpi"><p class="v">&minus;24%</p><p class="k">Peak reduction from arrival spread</p>
+    <p class="d">Dispersed plug-in times cut the peak from 253 kW to 193 kW at identical energy.</p></div>
+  <div class="kpi"><p class="v">2.9&times;</p><p class="k">Energy demand spread</p>
+    <p class="d">460 to 1,336 kWh per night &mdash; preferences set how much is drawn, not just when.</p></div>
+</section>
+
+<section class="card">
+  <p class="eyebrow">Primary result</p>
+  <h2>Fleet load by customer preference mix</h2>
+  <p class="sub">150 EVs, concentrated evening arrivals, averaged over three seeds. Each line is the same
+  physical fleet facing the same menus &mdash; only the taste distribution differs.</p>
+  <div class="legend" id="leg1"></div>
+  <div class="chart" id="c1"><div class="tip" id="t1"></div></div>
+</section>
+
+<div class="two-up">
+  <section class="card">
+    <h2>Effect of arrival timing</h2>
+    <p class="sub">Balanced preferences, 150 EVs. Dispersion flattens the peak without changing energy.</p>
+    <div class="legend" id="leg2"></div>
+    <div class="chart" id="c2"><div class="tip" id="t2"></div></div>
+  </section>
+  <section class="card">
+    <h2>Peak per vehicle against fleet size</h2>
+    <p class="sub">Concentrated arrivals. Roughly flat from 40 to 150 EVs: any diversity discount is
+    small and within seed noise, so peak scales close to proportionally here.</p>
+    <div class="legend" id="leg3"></div>
+    <div class="chart" id="c3"><div class="tip" id="t3"></div></div>
+  </section>
+</div>
+
+<section class="card">
+  <p class="eyebrow">All cells</p>
+  <h2>Scenario metrics at 150 vehicles</h2>
+  <p class="sub">Seed-averaged. Coincidence factor is fleet peak over the sum of individual peaks among
+  customers who actually charge; 1.00 would mean perfect synchronisation.</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr>
+        <th>Arrivals</th><th>Preference</th><th>Peak kW</th><th>At</th><th>Energy kWh</th>
+        <th>Coinc.</th><th>Rs/cust</th><th>Health</th><th>Target %</th><th>No charge</th><th>Delay h</th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card">
+  <p class="eyebrow">Reading</p>
+  <h2>What the sweep shows</h2>
+  <ul>
+    <li><span class="marker">01</span><p><b>Price response relocates the peak, it does not remove it.</b>
+      A cost-driven population deserts the 19:00&ndash;21:00 window almost entirely, then re-synchronises
+      on the overnight tariff trough and builds a fresh 125 kW spike at 03:00. The tariff is doing its job
+      and creating a new coincidence problem at the same time.</p></li>
+    <li><span class="marker">02</span><p><b>Cost and battery health are aligned here, not opposed.</b>
+      Cost-driven customers record the <i>highest</i> mean health score (95.8) and the lowest spend, because
+      both come from choosing a lower target SOC. The real tension in the menu is cost and health on one side
+      against range and convenience on the other.</p></li>
+    <li><span class="marker">03</span><p><b>Roughly half of plugged-in vehicles draw nothing.</b>
+      Between 43% and 62% of customers pick an option requiring no energy, because their current charge
+      already covers tomorrow's trip plus buffer. Sizing that assumes every connected vehicle charges
+      overstates demand substantially.</p></li>
+    <li><span class="marker">04</span><p><b>Arrival dispersion is the cheapest peak lever available.</b>
+      Moving from concentrated to dispersed plug-in times cuts the peak 24% and the coincidence factor from
+      0.50 to 0.36, at identical delivered energy &mdash; no tariff change and no customer persuasion required.</p></li>
+  </ul>
+</section>
+
+<footer>
+  <p class="eyebrow">Method and limits</p>
+  <p class="note">Utility is
+  <code>&minus;b_cost&middot;cost + b_health&middot;health &minus; b_delay&middot;delay + b_soc&middot;target</code>
+  with all four coefficients drawn per customer from lognormal population distributions, so signs are
+  guaranteed and heterogeneity rather than Gumbel noise drives choice diversity.</p>
+  <p class="note"><b>These coefficients are illustrative research assumptions.</b> They are not estimated
+  from revealed- or stated-preference data, and no willingness-to-pay figure derived from them should be
+  quoted as empirical. The tariff and EV catalogue values are likewise illustrative, not a regulated
+  retail tariff or manufacturer specification.</p>
+  <p class="note">Verification: raster energy matches source offer energy to 7.1&times;10<sup>&minus;15</sup> kWh;
+  no charging appears at or after any offer's ready time across 708 offers; choice probabilities normalise to
+  6.7&times;10<sup>&minus;16</sup>; peak load varies 2.3% across seeds. Requests are quantised to 30-minute
+  clock, 5-point SOC and 10 km trip buckets to make the menu bank cacheable &mdash; an unquantised re-run
+  moves peak by 4.1% and energy by 2.8%, so peak figures carry roughly that much grid sensitivity.</p>
+</footer>
+
+</div>
+
+<script>
+const DATA = __DATA__;
+
+const PREF_LABEL = {cost_driven:"Cost-driven", balanced:"Balanced",
+  health_driven:"Health-driven", convenience_driven:"Convenience-driven"};
+const PAT_LABEL = {concentrated:"Concentrated", dispersed:"Dispersed", bimodal:"Bimodal"};
+const SLOT = ["--s1","--s2","--s3","--s4"];
+const cssv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+function legend(el, items){
+  el.innerHTML = items.map(i =>
+    `<span><i class="swatch" style="background:${i.color}"></i>${i.label}</span>`).join("");
+}
+
+/* Line chart with crosshair + shared tooltip. xLabels drive the axis; series
+   is [{label,color,values}]. peakLabel adds a direct label at each series max,
+   which is also the relief for low-contrast slots in light mode. */
+/* Round the axis top up so every tick is a clean number. */
+function niceMax(v, ticks){
+  const raw=v/ticks, mag=Math.pow(10,Math.floor(Math.log10(raw))), norm=raw/mag;
+  const step=(norm<=1?1:norm<=2?2:norm<=2.5?2.5:norm<=5?5:10)*mag;
+  return step*ticks;
+}
+
+function lineChart(host, tip, xLabels, series, opts){
+  const W=opts.w||900, H=opts.h||330, ML=opts.ml||54, MR=opts.mr||64, MT=16, MB=34;
+  const iw=W-ML-MR, ih=H-MT-MB;
+  const n=xLabels.length;
+  const ticks = opts.yTicks || 5;
+  const maxY = niceMax(Math.max(...series.flatMap(s=>s.values))*1.10, ticks);
+  const X = i => ML + (n===1?0:(i/(n-1))*iw);
+  const Y = v => MT + ih - (v/maxY)*ih;
+  let g="";
+  for(let t=0;t<=ticks;t++){
+    const v=maxY*t/ticks, y=Y(v);
+    g+=`<line x1="${ML}" x2="${ML+iw}" y1="${y}" y2="${y}" stroke="${cssv('--rule-2')}" stroke-width="1"/>`;
+    g+=`<text x="${ML-9}" y="${y+4}" text-anchor="end" font-size="11" fill="${cssv('--muted')}"
+        font-family="IBM Plex Mono, monospace">${opts.fmtY?opts.fmtY(v):Math.round(v)}</text>`;
+  }
+  let xa="";
+  (opts.xTickIdx || xLabels.map((_,i)=>i).filter(i=>i%12===0)).forEach(i=>{
+    xa+=`<text x="${X(i)}" y="${H-12}" text-anchor="middle" font-size="11" fill="${cssv('--muted')}"
+         font-family="IBM Plex Mono, monospace">${xLabels[i]}</text>`;
+  });
+  let paths="", labels="";
+  const pending=[];
+  series.forEach(s=>{
+    const d=s.values.map((v,i)=>`${i?"L":"M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join("");
+    paths+=`<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2"
+            stroke-linejoin="round" stroke-linecap="round"/>`;
+    if(opts.dots) s.values.forEach((v,i)=>{
+      paths+=`<circle cx="${X(i)}" cy="${Y(v)}" r="4.5" fill="${s.color}"
+              stroke="${cssv('--surface')}" stroke-width="2"/>`;});
+    if(opts.peakLabel){
+      const mi=s.values.indexOf(Math.max(...s.values));
+      pending.push({x:X(mi), y:Y(s.values[mi])-10, label:s.label, color:s.color});
+    }
+  });
+  // Peaks cluster in the same evening window, so de-collide the direct labels
+  // vertically before drawing: sort by y and push each one clear of the last.
+  if(pending.length){
+    pending.sort((a,b)=>a.y-b.y);
+    const GAP=15;
+    for(let i=1;i<pending.length;i++){
+      if(pending[i].y - pending[i-1].y < GAP) pending[i].y = pending[i-1].y + GAP;
+    }
+    pending.forEach(p=>{
+      const anchor = p.x > ML+iw*0.70 ? "end" : "start";
+      labels+=`<text x="${p.x + (anchor==="end"?-8:8)}" y="${p.y}" text-anchor="${anchor}"
+        font-size="11.5" font-weight="600" fill="${p.color}"
+        font-family="IBM Plex Sans, sans-serif">${p.label}</text>`;
+    });
+  }
+  host.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${opts.aria||''}">
+    ${g}${xa}
+    <line x1="${ML}" x2="${ML+iw}" y1="${MT+ih}" y2="${MT+ih}" stroke="${cssv('--rule')}" stroke-width="1"/>
+    <g id="cross" style="opacity:0"><line y1="${MT}" y2="${MT+ih}" stroke="${cssv('--muted')}"
+      stroke-width="1" stroke-dasharray="3 3"/></g>
+    ${paths}${labels}
+    <rect x="${ML}" y="${MT}" width="${iw}" height="${ih}" fill="transparent" id="hit"/>
+  </svg>${tip.outerHTML}`;
+  const svg=host.querySelector("svg"), hit=host.querySelector("#hit");
+  const cross=host.querySelector("#cross"), tp=host.querySelector(".tip");
+  const marks=series.map(s=>{
+    const c=document.createElementNS("http://www.w3.org/2000/svg","circle");
+    c.setAttribute("r","4.5"); c.setAttribute("fill",s.color);
+    c.setAttribute("stroke",cssv('--surface')); c.setAttribute("stroke-width","2");
+    c.style.opacity=0; svg.appendChild(c); return c;
+  });
+  function move(ev){
+    const r=svg.getBoundingClientRect();
+    const px=(ev.clientX-r.left)/r.width*W;
+    let i=Math.round(((px-ML)/iw)*(n-1)); i=Math.max(0,Math.min(n-1,i));
+    cross.style.opacity=1; cross.firstElementChild.setAttribute("x1",X(i));
+    cross.firstElementChild.setAttribute("x2",X(i));
+    series.forEach((s,k)=>{marks[k].setAttribute("cx",X(i));marks[k].setAttribute("cy",Y(s.values[i]));
+      marks[k].style.opacity=1;});
+    tp.innerHTML=`<div class="th">${opts.tipHead?opts.tipHead(xLabels[i]):xLabels[i]}</div>`+
+      series.slice().sort((a,b)=>b.values[i]-a.values[i]).map(s=>
+      `<div class="tr"><span class="tl"><i class="swatch" style="background:${s.color}"></i>${s.label}</span>
+       <b>${opts.fmtV?opts.fmtV(s.values[i]):s.values[i].toFixed(1)}</b></div>`).join("");
+    tp.style.opacity=1;
+    const hostRect=host.getBoundingClientRect();
+    const left=(X(i)/W)*hostRect.width;
+    tp.style.left=Math.min(Math.max(left-tp.offsetWidth/2,0),hostRect.width-tp.offsetWidth)+"px";
+    tp.style.top="6px";
+  }
+  hit.addEventListener("mousemove",move);
+  hit.addEventListener("mouseleave",()=>{cross.style.opacity=0;tp.style.opacity=0;
+    marks.forEach(m=>m.style.opacity=0);});
+}
+
+function render(){
+  const prefs=Object.keys(DATA.byPreference);
+  const s1=prefs.map((p,i)=>({label:PREF_LABEL[p],color:cssv(SLOT[i]),values:DATA.byPreference[p]}));
+  legend(document.getElementById("leg1"),s1);
+  lineChart(document.getElementById("c1"),document.getElementById("t1"),DATA.labels,s1,
+    {h:340,peakLabel:true,fmtY:v=>Math.round(v),fmtV:v=>v.toFixed(1)+" kW",
+     tipHead:l=>"Fleet load at "+l, aria:"Fleet charging load by preference mix over 24 hours"});
+
+  const pats=Object.keys(DATA.byPattern);
+  const s2=pats.map((p,i)=>({label:PAT_LABEL[p],color:cssv(SLOT[i]),values:DATA.byPattern[p]}));
+  legend(document.getElementById("leg2"),s2);
+  lineChart(document.getElementById("c2"),document.getElementById("t2"),DATA.labels,s2,
+    {w:460,h:300,ml:40,mr:16,yTicks:4,peakLabel:false,fmtV:v=>v.toFixed(1)+" kW",
+     xTickIdx:DATA.labels.map((_,i)=>i).filter(i=>i%16===0),
+     tipHead:l=>"Fleet load at "+l, aria:"Fleet charging load by arrival pattern"});
+
+  const ns=DATA.scaling[prefs[0]].n;
+  // Per-vehicle peak: the fleet sizes are not equally spaced, so plotting total
+  // peak on a categorical axis would invite a slope reading the axis cannot support.
+  const s3=prefs.map((p,i)=>({label:PREF_LABEL[p],color:cssv(SLOT[i]),
+    values:DATA.scaling[p].peak.map((v,k)=>v/ns[k])}));
+  legend(document.getElementById("leg3"),s3);
+  lineChart(document.getElementById("c3"),document.getElementById("t3"),ns.map(String),s3,
+    {w:460,h:300,ml:40,mr:16,yTicks:4,dots:true,xTickIdx:[0,1,2],
+     fmtY:v=>v.toFixed(1),fmtV:v=>v.toFixed(2)+" kW/EV",
+     tipHead:l=>l+" vehicles", aria:"Peak load per vehicle against fleet size by preference mix"});
+
+  document.getElementById("tbody").innerHTML=DATA.table.map(r=>{
+    const ci=prefs.indexOf(r.preference);
+    return `<tr>
+      <td class="name">${PAT_LABEL[r.pattern]}</td>
+      <td class="name"><span class="chip"><i class="swatch" style="background:${cssv(SLOT[ci])}"></i>${PREF_LABEL[r.preference]}</span></td>
+      <td><b>${r.peak.toFixed(1)}</b></td><td>${r.peakTime}</td>
+      <td>${Math.round(r.energy)}</td><td>${r.cf.toFixed(2)}</td>
+      <td>${r.cost.toFixed(1)}</td><td>${r.health.toFixed(1)}</td>
+      <td>${r.target.toFixed(1)}</td><td>${Math.round(r.noCharge*100)}%</td>
+      <td>${r.delay.toFixed(1)}</td></tr>`;}).join("");
+}
+render();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",render);
+</script>

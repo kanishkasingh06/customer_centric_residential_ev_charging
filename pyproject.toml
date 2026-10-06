@@ -24,6 +24,11 @@ dev = [
   "ruff>=0.6",
   "mypy>=1.10",
 ]
+# research/ is exploratory analysis code, not the validated physical core. It
+# needs numpy, which the package itself deliberately does not depend on.
+research = [
+  "numpy>=1.26",
+]
 
 [tool.pytest.ini_options]
 addopts = "-q"
