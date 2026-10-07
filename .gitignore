@@ -19,3 +19,11 @@ research/results.json
 research/counterfactual.json
 research/viz_data.json
 research/dashboard_built.html
+
+# Same rule for the V2G extraction scripts: menu7.json and profiles.json are
+# solver output, and the built pages are those files poured into the
+# viz_*.html templates. Regenerate, never track.
+research/menu7.json
+research/profiles.json
+research/viz_menu7_built.html
+research/viz_profiles_built.html

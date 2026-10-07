@@ -1,0 +1,296 @@
+"""V2G menu generation: requests, saving levels, offers, Pareto filter.
+
+Formulation reference: Rev 4.2 Block 3 (eq. 45), Block 4 (eq. 56-57),
+Block 5 (eq. 61-62).
+
+Offer tuple is ``(ready_by, target_soc, saving, capacity_fade)``.  Export
+energy rides along as an INFORMATIONAL field: it tells the customer how
+much of their consent an offer spends, but it is not a dominance axis.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from evmenu.degradation import DegradationSettings
+from evmenu.schemas import ChargingSession, EVSpec, PlanningSignal
+
+from .envelope import V2GEnvelope
+from .trajectory import (
+    RequestContext,
+    Trajectory,
+    capacities,
+    evaluate,
+    interval_durations,
+    solve,
+    warm_start,
+)
+
+#: Absolute floor on the realization band half-width, eq. (62).  Without it
+#: a zero-saving offer gets the degenerate band [0, 0].
+DEFAULT_BAND_ABSOLUTE_FLOOR = 0.50
+
+
+@dataclass(frozen=True, slots=True)
+class V2GOffer:
+    """One customer-facing offer."""
+
+    offer_id: str
+    ready_step: int
+    ready_minute: int
+    target_soc: float
+    saving: float
+    capacity_fade: float
+    charging_cost: float
+    bau_cost: float
+    export_energy_kwh: float
+    import_energy_kwh: float
+    calendar_window_fade: float
+    calendar_parked_fade: float
+    cycle_fade: float
+    soc_excursion: float
+    peak_c_rate: float
+    equivalent_full_cycles: float
+    requested_level: float
+    simultaneous_periods: int
+    trajectory: Trajectory
+
+    @property
+    def uses_export(self) -> bool:
+        return self.export_energy_kwh > 1e-9
+
+
+def bau_cost_for(
+    *,
+    ev: EVSpec,
+    session: ChargingSession,
+    signal: PlanningSignal,
+    terminal_energy_kwh: float,
+) -> float:
+    """Same-service BAU: unidirectional immediate charging to ``B^dagger``.
+
+    Where the departure floor sits below the arrival SOC the reference
+    requires no purchased energy and the cost is zero; the saving is then
+    pure net export revenue, which the caller should flag.
+    """
+    required = max(0.0, terminal_energy_kwh - session.initial_energy_kwh) / ev.charging_efficiency
+    n = session.departure_step - session.arrival_step
+    cost = 0.0
+    for index in range(n):
+        if required <= 0.0:
+            break
+        step = session.arrival_step + index
+        cap = ev.charger_power_kw * signal.interval_durations[step]
+        take = min(cap, required)
+        cost += signal.price_per_kwh[step] * take
+        required -= take
+    return cost
+
+
+def candidate_targets(
+    *, ev: EVSpec, session: ChargingSession, standard: tuple[float, ...] = (0.8, 0.9, 1.0)
+) -> list[float]:
+    """Standard tiers plus the trip's own personalised minimum."""
+    minimum = (
+        session.commute_energy_kwh + session.buffer_energy_kwh
+    ) / ev.battery_capacity_kwh
+    targets = {round(min(1.0, max(0.0, minimum)), 6)}
+    for value in standard:
+        targets.add(round(value, 6))
+    return sorted(t for t in targets if 0.0 <= t <= 1.0)
+
+
+def candidate_ready_steps(
+    *,
+    ev: EVSpec,
+    session: ChargingSession,
+    signal: PlanningSignal,
+    terminal_energy_kwh: float,
+    maximum: int = 4,
+) -> list[int]:
+    """Ready-by boundaries from the earliest achievable through departure."""
+    required = max(0.0, terminal_energy_kwh - session.initial_energy_kwh) / ev.charging_efficiency
+    n = session.departure_step - session.arrival_step
+    earliest = session.arrival_step
+    remaining = required
+    for index in range(n):
+        if remaining <= 1e-12:
+            break
+        step = session.arrival_step + index
+        remaining -= min(ev.charger_power_kw * signal.interval_durations[step], remaining)
+        earliest = step + 1
+    latest = session.departure_step
+    if earliest >= latest:
+        return [latest]
+    span = latest - earliest
+    if span <= maximum:
+        return list(range(earliest, latest + 1))
+    stride = span / maximum
+    steps = sorted({earliest + int(round(i * stride)) for i in range(maximum + 1)})
+    return [min(latest, s) for s in steps]
+
+
+def saving_levels(maximum_saving: float, *, levels: int) -> list[float]:
+    """``k/K * S_max`` for ``k = 0..K``, eq. (45).
+
+    ``k = 0`` is the health-oriented endpoint: no positive saving is
+    required, and the generation band's floored lower edge keeps it from
+    becoming a negative-saving offer.
+    """
+    if levels < 1:
+        raise ValueError("levels must be at least 1")
+    if maximum_saving <= 0.0:
+        return [0.0]
+    return [maximum_saving * k / levels for k in range(levels + 1)]
+
+
+def generate_offers(
+    *,
+    ev: EVSpec,
+    session: ChargingSession,
+    signal: PlanningSignal,
+    envelope: V2GEnvelope,
+    settings: DegradationSettings,
+    sell_price: tuple[float, ...],
+    discharge_severity: float = 1.0,
+    levels: int = 4,
+    band_tolerance: float = 0.5,
+    guard_weight: float = 0.0,
+    restarts: int = 1,
+    maximum_ready_steps: int = 4,
+) -> list[V2GOffer]:
+    """Generate every feasible offer across the request space."""
+    offers: list[V2GOffer] = []
+    starts = signal.interval_start_minutes
+    for target in candidate_targets(ev=ev, session=session):
+        probe = RequestContext(
+            ev=ev,
+            session=session,
+            signal=signal,
+            envelope=envelope,
+            settings=settings,
+            ready_step=session.departure_step,
+            target_soc=target,
+            sell_price=sell_price,
+            discharge_severity=discharge_severity,
+        )
+        terminal = probe.terminal_energy_kwh
+        if terminal > ev.battery_capacity_kwh + 1e-9:
+            continue
+        bau = bau_cost_for(
+            ev=ev, session=session, signal=signal, terminal_energy_kwh=terminal
+        )
+        for ready_step in candidate_ready_steps(
+            ev=ev,
+            session=session,
+            signal=signal,
+            terminal_energy_kwh=terminal,
+            maximum=maximum_ready_steps,
+        ):
+            ctx = RequestContext(
+                ev=ev,
+                session=session,
+                signal=signal,
+                envelope=envelope,
+                settings=settings,
+                ready_step=ready_step,
+                target_soc=target,
+                sell_price=sell_price,
+                discharge_severity=discharge_severity,
+            )
+            # Proposition 3: the relaxation is exact here, so the maximum-
+            # saving endpoint needs neither binaries nor restarts.
+            cheapest = solve(ctx, objective="cost", bau_cost=bau, restarts=1)
+            if cheapest is None:
+                continue
+            maximum_saving = cheapest.saving
+            for level in saving_levels(maximum_saving, levels=levels):
+                low = max(0.0, level - band_tolerance)
+                high = level + band_tolerance
+                found = solve(
+                    ctx,
+                    objective="fade",
+                    bau_cost=bau,
+                    saving_low=low,
+                    saving_high=high,
+                    guard_weight=guard_weight,
+                    restarts=restarts,
+                )
+                if found is None:
+                    continue
+                minute = (
+                    starts[ready_step] if starts is not None and ready_step < len(starts)
+                    else ready_step
+                )
+                offers.append(
+                    V2GOffer(
+                        offer_id=(
+                            f"{ev.ev_id}-z{int(round(target * 100))}"
+                            f"-r{ready_step}-s{level:.2f}"
+                        ),
+                        ready_step=ready_step,
+                        ready_minute=int(minute),
+                        target_soc=target,
+                        saving=found.saving,
+                        capacity_fade=found.fade.total,
+                        charging_cost=found.cost,
+                        bau_cost=bau,
+                        export_energy_kwh=found.fade.export_energy_kwh,
+                        import_energy_kwh=float(sum(found.grid_in_kwh)),
+                        calendar_window_fade=found.fade.calendar_window,
+                        calendar_parked_fade=found.fade.calendar_parked,
+                        cycle_fade=found.fade.cycle,
+                        soc_excursion=found.fade.soc_excursion,
+                        peak_c_rate=found.fade.peak_c_rate,
+                        equivalent_full_cycles=found.fade.equivalent_full_cycles,
+                        requested_level=level,
+                        simultaneous_periods=found.simultaneous_periods,
+                        trajectory=found,
+                    )
+                )
+    return offers
+
+
+def dominates(a: V2GOffer, b: V2GOffer, *, tol: float = 1e-9) -> bool:
+    """Four-attribute dominance with the fade inequality REVERSED.
+
+    ``a > b`` iff a is sooner-or-equal, at-least-as-much SOC, at-least-as-
+    much saving and at-least-as-low fade, with one strict.  The sign flip
+    relative to a 0-100 health score is the point: lower fade is better.
+    """
+    not_worse = (
+        a.ready_step <= b.ready_step + tol
+        and a.target_soc >= b.target_soc - tol
+        and a.saving >= b.saving - tol
+        and a.capacity_fade <= b.capacity_fade + tol
+    )
+    if not not_worse:
+        return False
+    return (
+        a.ready_step < b.ready_step - tol
+        or a.target_soc > b.target_soc + tol
+        or a.saving > b.saving + tol
+        or a.capacity_fade < b.capacity_fade - tol
+    )
+
+
+def pareto_filter(offers: list[V2GOffer]) -> list[V2GOffer]:
+    """Retain offers not dominated by any other."""
+    return [a for a in offers if not any(dominates(b, a) for b in offers if b is not a)]
+
+
+def compact(offers: list[V2GOffer], *, merge_tolerance: float = 5.0) -> list[V2GOffer]:
+    """Within each (ready, target) group, keep the lowest-fade offer per band."""
+    buckets: dict[tuple[int, float, int], V2GOffer] = {}
+    for offer in offers:
+        key = (
+            offer.ready_step,
+            round(offer.target_soc, 6),
+            int(offer.saving // merge_tolerance) if merge_tolerance > 0 else 0,
+        )
+        current = buckets.get(key)
+        if current is None or offer.capacity_fade < current.capacity_fade:
+            buckets[key] = offer
+    return sorted(
+        buckets.values(), key=lambda o: (o.target_soc, o.ready_step, -o.saving)
+    )
