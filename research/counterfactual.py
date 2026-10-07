@@ -37,24 +37,47 @@ POLICIES = ("uncontrolled", "max_saving", "min_cost", "best_health")
 
 
 def pick(record, policy: str) -> int:
-    """Return the offer index this policy selects."""
-    offers = record.offers
-    best_saving = int(np.argmax([o.advertised_saving for o in offers]))
+    """Return the index into ``record.choice_set`` this policy selects.
+
+    Indices address ``record.choice_set`` -- displayed offers followed by the
+    BAU references -- which is what ``fleet.rasterise`` and
+    ``choice.menu_attribute_matrix`` also use.
+    """
+    offers = record.choice_set
+    displayed = record.offers
+    if not displayed:
+        raise ValueError("menu has no displayed offers")
+    best_saving = int(np.argmax([o.advertised_saving for o in displayed]))
     if policy == "max_saving":
         return best_saving
+    # min_cost and best_health characterise THE MENU -- the best option a
+    # customer could take from what they were offered -- so they range over the
+    # displayed offers only. Letting them see the BAU references makes both
+    # collapse to "decline to charge", which is true but says nothing about
+    # menu design. The choice model does see the full set; these do not.
     if policy == "min_cost":
-        return int(np.argmin([o.charging_cost for o in offers]))
+        return int(np.argmin([o.charging_cost for o in displayed]))
     if policy == "best_health":
-        return int(np.argmax([o.health_score for o in offers]))
+        # battery_stress is capacity LOST, so least damage is the MINIMUM.
+        # This was argmax over a field that e4bea57 turned into a damage
+        # measure, so the policy was selecting the WORST offer on every menu.
+        return int(np.argmin([o.battery_stress for o in displayed]))
     if policy == "uncontrolled":
-        # The immediate-charging BAU at the same target as the max-saving offer:
-        # zero saving by construction, so it is the BAU for that target.
-        target = offers[best_saving].target_soc
-        candidates = [
-            i for i, o in enumerate(offers)
-            if o.target_soc == target and abs(o.advertised_saving) <= 1e-8
-        ]
-        return candidates[0] if candidates else best_saving
+        # The immediate-charging BAU at the same target as the max-saving
+        # offer. Identical delivered energy, so max_saving vs uncontrolled
+        # isolates timing alone -- which only holds if the target really does
+        # match, hence the hard failure below rather than a fallback.
+        target = displayed[best_saving].target_soc
+        for index, offer in enumerate(offers):
+            if offer.role == "bau" and abs(offer.target_soc - target) <= 1e-9:
+                return index
+        raise ValueError(
+            f"no BAU reference at target {target:.3f}; the uncontrolled baseline "
+            f"is undefined for this menu. Available BAU targets: "
+            f"{sorted(o.target_soc for o in record.bau_offers)}. "
+            "An earlier version silently fell back to the max-saving offer here, "
+            "which made uncontrolled and max_saving identical in every table."
+        )
     raise ValueError(policy)
 
 
@@ -68,7 +91,7 @@ def run_policy(pattern: str, policy: str, size: int, seed: int, bank: MenuBank):
         if record is None:
             continue
         index = pick(record, policy)
-        offer = record.offers[index]
+        offer = record.choice_set[index]
         if offer.energy_kwh > 1e-9:
             peak_individual += max(offer.power_kw)
         targets.append(offer.target_soc * 100.0)
@@ -90,7 +113,7 @@ def saving_column_diagnostic(bank: MenuBank) -> dict:
         record = bank.get(customer.key)
         if record is None:
             continue
-        offers = record.offers
+        offers = record.offers      # displayed options only: what a customer sees
         total += 1
         best_saving = int(np.argmax([o.advertised_saving for o in offers]))
         cheapest = int(np.argmin([o.charging_cost for o in offers]))

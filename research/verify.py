@@ -45,13 +45,40 @@ def main() -> None:
     rng = np.random.default_rng(2024)
     draws = sample_fleet(MAX_FLEET, ARRIVAL_PATTERNS["concentrated"], np.random.default_rng(11))
 
+    print("\n0. Choice sets are complete (BAU reference present at every target)")
+    missing_bau = 0
+    no_decline = 0
+    inspected = 0
+    for customer in draws[:60]:
+        record = bank.get(customer.key)
+        if record is None:
+            continue
+        inspected += 1
+        if not record.bau_offers:
+            missing_bau += 1
+        displayed_targets = {round(o.target_soc, 6) for o in record.offers}
+        bau_targets = {round(o.target_soc, 6) for o in record.bau_offers}
+        if not displayed_targets <= bau_targets:
+            no_decline += 1
+    check("BAU references present", missing_bau == 0,
+          f"{missing_bau} of {inspected} menus carry none")
+    check("BAU covers every displayed target", no_decline == 0,
+          f"{no_decline} of {inspected} menus leave a displayed target without "
+          "an uncontrolled baseline")
+    # This check exists because its absence was expensive. e4bea57 moved the BAU
+    # offers out of the displayed menu; this layer kept reading only the
+    # displayed offers, so every choice set silently lost "decline to charge"
+    # and counterfactual.py silently compared max_saving against itself. Checks
+    # 1-5 below all passed throughout, because each of them only inspects the
+    # offers that reached it.
+
     print("\n1. Energy conservation (raster vs source offers)")
     worst = 0.0
     for customer in draws[:60]:
         record = bank.get(customer.key)
         if record is None:
             continue
-        for index, offer in enumerate(record.offers):
+        for index, offer in enumerate(record.choice_set):
             raster = rasterise(record, index).sum() * GRID_MIN / 60.0
             worst = max(worst, abs(offer.energy_kwh - raster))
     check("max energy error", worst < 1e-9, f"{worst:.3e} kWh over 60 customers x all offers")
@@ -64,7 +91,7 @@ def main() -> None:
         if record is None:
             continue
         starts = record.interval_start_minutes
-        for offer in record.offers:
+        for offer in record.choice_set:
             checked += 1
             if offer.ready_step >= len(starts):
                 continue

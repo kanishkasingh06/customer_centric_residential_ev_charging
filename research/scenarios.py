@@ -18,7 +18,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
-from choice import PREFERENCE_MIXES, choice_probabilities, menu_attribute_matrix, utilities
+from choice import (
+    PREFERENCE_MIXES,
+    choice_probabilities,
+    menu_attribute_matrix,
+    utilities,
+    wear_cost_rs,
+)
 from fleet import (
     ARRIVAL_PATTERNS,
     GRID_MIN,
@@ -49,7 +55,7 @@ class CellResult:
     energy_kwh: float
     coincidence_factor: float
     mean_cost_rs: float
-    mean_health: float
+    mean_wear_rs: float   # Rs of pack capacity consumed, see choice.wear_cost_rs
     mean_target_soc: float
     share_no_charge: float
     mean_ready_delay_h: float
@@ -87,7 +93,7 @@ def run_cell(
     betas = distribution.draw(rng, len(fleet))
 
     load = np.zeros(N_CELLS, dtype=float)
-    costs, healths, targets, delays = [], [], [], []
+    costs, wears, targets, delays = [], [], [], []
     served = 0
     no_charge = 0
     peak_individual = 0.0
@@ -100,14 +106,16 @@ def run_cell(
         customer_betas = {k: np.asarray([v[index]]) for k, v in betas.items()}
         attributes = menu_attribute_matrix(record)
         chosen = _choose(attributes, customer_betas, rng)
-        offer = record.offers[chosen]
+        # chosen indexes record.choice_set: displayed offers THEN BAU references.
+        offer = record.choice_set[chosen]
         if offer.energy_kwh <= 1e-9:
             no_charge += 1
         else:
             peak_individual += max(offer.power_kw)
         load += rasterise(record, chosen)
         costs.append(offer.charging_cost)
-        healths.append(offer.health_score)
+        wears.append(wear_cost_rs(offer.battery_stress, record.usable_battery_kwh,
+                                  record.chemistry))
         targets.append(offer.target_soc * 100.0)
         delays.append(attributes[chosen, 2])
 
@@ -128,7 +136,7 @@ def run_cell(
         # peaks of the customers who actually charge. 1.0 = fully synchronised.
         coincidence_factor=float(load.max() / peak_individual) if peak_individual > 0 else 0.0,
         mean_cost_rs=float(np.mean(costs)),
-        mean_health=float(np.mean(healths)),
+        mean_wear_rs=float(np.mean(wears)),
         mean_target_soc=float(np.mean(targets)),
         share_no_charge=no_charge / served,
         mean_ready_delay_h=float(np.mean(delays)),

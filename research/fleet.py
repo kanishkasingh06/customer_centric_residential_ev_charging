@@ -36,6 +36,13 @@ RESEARCH_DIR = Path(__file__).parent
 TARIFF_CSV = RESEARCH_DIR / "hourly_tariff.csv"
 BANK_PATH = RESEARCH_DIR / "menu_bank.pkl"
 
+# Bump whenever the stored MenuRecord/OfferRecord shape changes. The bank is a
+# pickle of dataclass instances, so an older file loads without complaint and
+# then fails somewhere unrelated when a missing field is touched. A refusal at
+# load time costs one rebuild; a silent half-load costs a results table nobody
+# can trust. v2 added bau_offers, battery_stress and the pack properties.
+BANK_SCHEMA_VERSION = 2
+
 # Frontier config established in the phase-11 diagnosis: the plating guard was
 # inverting the ordering of an already-negligible within-request signal, and
 # intermediate frontier levels are physically identical to the endpoints.
@@ -220,7 +227,7 @@ class OfferRecord:
     ready_minute: int          # absolute minute of the ready boundary
     charging_cost: float       # Rs
     advertised_saving: float   # Rs, against the SAME-TARGET BAU (see counterfactual.py)
-    health_score: float        # 0-100
+    battery_stress: float      # fraction of pack capacity lost this session; LOWER IS BETTER
     energy_kwh: float
     power_kw: tuple[float, ...]
 
@@ -239,16 +246,35 @@ class MenuRecord:
     interval_start_minutes: tuple[int, ...]
     interval_end_minutes: tuple[int, ...]
     offers: tuple[OfferRecord, ...]
+    # The same-target BAU references. e4bea57 moved these OUT of the displayed
+    # menu (README.md:45): the customer-facing menu holds positive-saving,
+    # non-BAU options only, and one BAU per feasible target remains available
+    # separately as ``assembled_menu.bau_reference_offers``. This layer read
+    # only the displayed offers for a long time and therefore never saw them,
+    # which silently removed "decline to charge" from every choice set and left
+    # counterfactual.py with no uncontrolled baseline to compare against.
+    bau_offers: tuple[OfferRecord, ...]
+    # Pack properties, carried so the monetary wear term can be computed at
+    # analysis time rather than baked into the bank -- a pack-cost sensitivity
+    # sweep must not require a nine-hour rebuild.
+    model_id: str
+    usable_battery_kwh: float
+    chemistry: str
 
     @classmethod
     def from_menu(cls, menu) -> MenuRecord:
         starts = tuple(menu.interval_start_minutes)
         ends = tuple(menu.interval_end_minutes)
-        source = {s.offer_id: s.endpoint_role for s in menu.assembled_menu.source_metadata}
-        offers = tuple(
-            OfferRecord(
+        assembled = menu.assembled_menu
+        source = {s.offer_id: s.endpoint_role for s in assembled.source_metadata}
+
+        def _record(offer, role: str) -> OfferRecord:
+            stress = offer.raw_battery_stress
+            if stress is None:
+                stress = offer.incremental_degradation
+            return OfferRecord(
                 offer_id=offer.offer_id,
-                role=source[offer.offer_id],
+                role=role,
                 target_soc=float(offer.target_soc),
                 ready_step=int(offer.ready_step),
                 ready_minute=int(
@@ -256,13 +282,41 @@ class MenuRecord:
                 ),
                 charging_cost=float(offer.charging_cost),
                 advertised_saving=float(offer.advertised_saving),
-                health_score=float(offer.charging_health_score),
+                battery_stress=float(stress),
                 energy_kwh=float(sum(offer.profile.grid_energy_kwh)),
                 power_kw=tuple(float(p) for p in offer.profile.power_kw),
             )
-            for offer in menu.assembled_menu.offers
+
+        offers = tuple(_record(o, source[o.offer_id]) for o in assembled.offers)
+        bau = tuple(_record(o, "bau") for o in assembled.bau_reference_offers)
+        if not bau:
+            raise ValueError(
+                f"menu for {menu.ev_model.model_id} carries no BAU reference offers; "
+                "the uncontrolled baseline and the decline-to-charge option both "
+                "depend on them"
+            )
+        return cls(
+            interval_start_minutes=starts,
+            interval_end_minutes=ends,
+            offers=offers,
+            bau_offers=bau,
+            model_id=str(menu.ev_model.model_id),
+            usable_battery_kwh=float(menu.ev_model.usable_battery_kwh),
+            chemistry=str(menu.ev_model.chemistry),
         )
-        return cls(interval_start_minutes=starts, interval_end_minutes=ends, offers=offers)
+
+    @property
+    def choice_set(self) -> tuple[OfferRecord, ...]:
+        """Offers a customer may actually pick.
+
+        The displayed menu plus the BAU references. Including the BAU is a
+        deliberate modelling decision, not a convenience: a real customer can
+        always decline the menu and charge conventionally, or not charge at all.
+        Excluding them -- which is what reading ``assembled_menu.offers`` alone
+        did -- forces every simulated customer to accept an optimised offer and
+        makes "share who draw nothing" identically zero by construction.
+        """
+        return self.offers + self.bau_offers
 
 
 def build_menu(key: tuple):
@@ -304,12 +358,20 @@ class MenuBank:
             try:
                 with path.open("rb") as handle:
                     state = pickle.load(handle)
-                self.menus = state["menus"]
-                self.infeasible = state["infeasible"]
             except (EOFError, pickle.UnpicklingError) as exc:
                 raise SystemExit(
                     f"menu bank at {path} is corrupt ({exc}). Delete it and re-run."
                 ) from exc
+            version = state.get("schema_version")
+            if version != BANK_SCHEMA_VERSION:
+                raise SystemExit(
+                    f"menu bank at {path} was built under schema version "
+                    f"{version!r}, but this code needs {BANK_SCHEMA_VERSION!r}. "
+                    "The stored record shape changed, so resuming would mix "
+                    "incompatible entries. Delete the bank and rebuild it."
+                )
+            self.menus = state["menus"]
+            self.infeasible = state["infeasible"]
 
     def save(self) -> None:
         """Write atomically: an interrupted save must never corrupt the bank."""
@@ -320,7 +382,11 @@ class MenuBank:
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 pickle.dump(
-                    {"menus": self.menus, "infeasible": self.infeasible},
+                    {
+                        "schema_version": BANK_SCHEMA_VERSION,
+                        "menus": self.menus,
+                        "infeasible": self.infeasible,
+                    },
                     handle,
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
@@ -389,7 +455,9 @@ def rasterise(record, offer_index: int) -> np.ndarray:
     """
     starts = record.interval_start_minutes
     ends = record.interval_end_minutes
-    power = record.offers[offer_index].power_kw
+    # Indices refer to record.choice_set (displayed offers THEN BAU references),
+    # which is the same ordering choice.menu_attribute_matrix builds its rows in.
+    power = record.choice_set[offer_index].power_kw
     cell_kwh = np.zeros(N_CELLS, dtype=float)
     offered_kwh = 0.0
     for start, end, kilowatts in zip(starts, ends, power):
