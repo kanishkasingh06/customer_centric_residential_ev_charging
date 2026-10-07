@@ -31,7 +31,7 @@ import json
 import numpy as np
 from choice import PREFERENCE_MIXES
 from fleet import ARRIVAL_PATTERNS, GRID_MIN, MenuBank, clock_labels, rasterise, sample_fleet
-from scenarios import MAX_FLEET, SEEDS, run_cell
+from scenarios import MAX_FLEET, RESEARCH_DIR, SEEDS, run_cell
 
 POLICIES = ("uncontrolled", "max_saving", "min_cost", "best_health")
 
@@ -165,7 +165,9 @@ def main() -> None:
                 "mean_target_soc": float(np.mean([c.mean_target_soc for c in cells])),
             })
 
-    with open("counterfactual.json", "w", encoding="utf-8") as handle:
+    # Beside the other outputs, not in whatever directory this was launched
+    # from. Writing to the cwd left a stale copy in the repo root.
+    with (RESEARCH_DIR / "counterfactual.json").open("w", encoding="utf-8") as handle:
         json.dump({"diagnostic": diag, "rows": rows}, handle, indent=1)
 
     for pattern in ARRIVAL_PATTERNS:

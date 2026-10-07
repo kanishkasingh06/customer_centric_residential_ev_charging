@@ -216,7 +216,9 @@ def test_wear_enters_utility_as_a_cost_not_a_benefit() -> None:
 
 def test_preference_mixes_price_wear_against_money() -> None:
     for mix in choice.PREFERENCE_MIXES.values():
-        assert mix.median_wear == pytest.approx(mix.median_cost * mix.wear_internalisation)
+        assert mix.median_wear == pytest.approx(
+            choice.REFERENCE_MONEY_WEIGHT * mix.wear_internalisation
+        )
     assert choice.PREFERENCE_MIXES["health_driven"].wear_internalisation > 1.0
     assert choice.PREFERENCE_MIXES["convenience_driven"].wear_internalisation < 1.0
     with pytest.raises(ValueError, match="wear_internalisation"):
@@ -232,3 +234,41 @@ def test_bank_refuses_a_stale_schema(tmp_path) -> None:
         pickle.dump({"schema_version": 1, "menus": {}, "infeasible": set()}, handle)
     with pytest.raises(SystemExit, match="schema version"):
         fleet.MenuBank(path)
+
+
+def test_wear_weight_orders_by_internalisation_not_by_price_sensitivity() -> None:
+    """A segment defined by caring about battery life must weigh wear more.
+
+    Regression test. The first version anchored b_wear to each segment's OWN
+    median_cost, so health_driven (0.008 x 2.50) and balanced (0.020 x 1.00)
+    both came out at 0.020 -- identical absolute weight. A rupee of wear then
+    moved the two segments equally, and health_driven differed only by caring
+    less about money. In the sweep it wore batteries MORE than balanced
+    (48.9-59.0 Rs against 40.2-47.7 Rs), which is the opposite of its name.
+    """
+    mixes = choice.PREFERENCE_MIXES
+    balanced = mixes["balanced"]
+    health = mixes["health_driven"]
+    cost = mixes["cost_driven"]
+
+    assert health.median_wear > balanced.median_wear, (
+        "health_driven must weigh wear more in ABSOLUTE utils, not just "
+        "relative to its own cost coefficient"
+    )
+    assert cost.median_wear < balanced.median_wear
+
+    # The ordering must survive wildly different price sensitivities, which is
+    # exactly what the broken version failed to do.
+    assert health.median_cost < cost.median_cost
+    for name, mix in mixes.items():
+        assert mix.median_wear == pytest.approx(
+            choice.REFERENCE_MONEY_WEIGHT * mix.wear_internalisation
+        ), f"{name}: wear weight must be anchored to the reference money scale"
+
+
+def test_a_wear_sensitive_segment_actually_responds_to_wear() -> None:
+    """Utility must move more for health_driven than for cost_driven."""
+    extra_wear_rs = 50.0
+    health = choice.PREFERENCE_MIXES["health_driven"]
+    cost = choice.PREFERENCE_MIXES["cost_driven"]
+    assert health.median_wear * extra_wear_rs > cost.median_wear * extra_wear_rs * 2.0

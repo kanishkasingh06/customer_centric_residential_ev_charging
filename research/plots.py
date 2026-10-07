@@ -67,7 +67,7 @@ def main() -> None:
                 "energy": metric(pat, pref, 150, "energy_kwh"),
                 "cf": metric(pat, pref, 150, "coincidence_factor"),
                 "cost": metric(pat, pref, 150, "mean_cost_rs"),
-                "health": metric(pat, pref, 150, "mean_health"),
+                "wear": metric(pat, pref, 150, "mean_wear_rs"),
                 "target": metric(pat, pref, 150, "mean_target_soc"),
                 "noCharge": metric(pat, pref, 150, "share_no_charge"),
                 "delay": metric(pat, pref, 150, "mean_ready_delay_h"),

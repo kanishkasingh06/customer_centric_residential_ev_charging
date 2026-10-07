@@ -149,8 +149,10 @@ them as empirical, and do not quietly drop the disclaimers.
 
 The sweep is fully seeded, so the menu bank rebuilds to the same set of keys
 on the same code: **1,202 keys** across the three arrival patterns and three
-seeds at the maximum fleet size. (An earlier note here said "1,183 menus and 19
-infeasible", which is the same 1,202 split by outcome.)
+seeds at the maximum fleet size. The split between feasible and infeasible is
+NOT stable across evmenu versions -- it was 1,183/19 on 4d109c5 and is 1,186/16
+on 9c60b98, because the saving-band and ready_step fixes serve requests that
+used to be refused. Only the total is a fixed property of the sampler.
 
 The midnight fix does not change that total -- measured both ways, 1,202 before
 and after -- but it does change **9 of the keys**: the ones whose arrival had
@@ -162,5 +164,9 @@ Individual peaks can move by ~2% across SciPy versions, because SLSQP solutions
 differ in their last digits and that can flip a marginal choice. Do not expect
 bit-identical numbers across environments; do expect the conclusions to hold.
 
-The seed-to-seed variation figure quoted elsewhere in this project (2.3%) comes
-from a sweep run with the wraparound live and has not been re-measured.
+Seed-to-seed variation of peak load is **10.3%** (concentrated / balanced /
+150 EVs, peaks 167.5 / 138.2 / 133.2 kW), measured on 44d0b70. The 2.3% figure
+quoted in earlier write-ups came from a sweep run before the midnight,
+choice-set and wear fixes; it is superseded, not merely unverified. Quantisation
+sensitivity is 2.3% on peak and 9.1% on energy against an unquantised re-run --
+the energy figure is large enough to be worth stating alongside any result.

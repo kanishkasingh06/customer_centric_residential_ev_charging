@@ -183,7 +183,7 @@ code{font-family:"IBM Plex Mono",monospace; font-size:.9em; background:var(--sur
     <table>
       <thead><tr>
         <th>Arrivals</th><th>Preference</th><th>Peak kW</th><th>At</th><th>Energy kWh</th>
-        <th>Coinc.</th><th>Rs/cust</th><th>Health</th><th>Target %</th><th>No charge</th><th>Delay h</th>
+        <th>Coinc.</th><th>Rs/cust</th><th>Wear Rs</th><th>Target %</th><th>No charge</th><th>Delay h</th>
       </tr></thead>
       <tbody id="tbody"></tbody>
     </table>
@@ -199,7 +199,8 @@ code{font-family:"IBM Plex Mono",monospace; font-size:.9em; background:var(--sur
       on the overnight tariff trough and builds a fresh 125 kW spike at 03:00. The tariff is doing its job
       and creating a new coincidence problem at the same time.</p></li>
     <li><span class="marker">02</span><p><b>Cost and battery health are aligned here, not opposed.</b>
-      Cost-driven customers record the <i>highest</i> mean health score (95.8) and the lowest spend, because
+      Cost-driven customers consume the <i>least</i> battery capacity (about Rs 25-28 per session of pack
+      wear, against Rs 68-87 for convenience-driven) and spend the least, because
       both come from choosing a lower target SOC. The real tension in the menu is cost and health on one side
       against range and convenience on the other.</p></li>
     <li><span class="marker">03</span><p><b>Roughly half of plugged-in vehicles draw nothing.</b>
@@ -215,7 +216,7 @@ code{font-family:"IBM Plex Mono",monospace; font-size:.9em; background:var(--sur
 <footer>
   <p class="eyebrow">Method and limits</p>
   <p class="note">Utility is
-  <code>&minus;b_cost&middot;cost + b_health&middot;health &minus; b_delay&middot;delay + b_soc&middot;target</code>
+  <code>&minus;b_cost&middot;cost &minus; b_wear&middot;wear &minus; b_delay&middot;delay + b_soc&middot;target</code>
   with all four coefficients drawn per customer from lognormal population distributions, so signs are
   guaranteed and heterogeneity rather than Gumbel noise drives choice diversity.</p>
   <p class="note"><b>These coefficients are illustrative research assumptions.</b> They are not estimated
@@ -377,7 +378,7 @@ function render(){
       <td class="name"><span class="chip"><i class="swatch" style="background:${cssv(SLOT[ci])}"></i>${PREF_LABEL[r.preference]}</span></td>
       <td><b>${r.peak.toFixed(1)}</b></td><td>${r.peakTime}</td>
       <td>${Math.round(r.energy)}</td><td>${r.cf.toFixed(2)}</td>
-      <td>${r.cost.toFixed(1)}</td><td>${r.health.toFixed(1)}</td>
+      <td>${r.cost.toFixed(1)}</td><td>${r.wear.toFixed(1)}</td>
       <td>${r.target.toFixed(1)}</td><td>${Math.round(r.noCharge*100)}%</td>
       <td>${r.delay.toFixed(1)}</td></tr>`;}).join("");
 }

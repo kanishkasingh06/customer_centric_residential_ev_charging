@@ -85,6 +85,15 @@ CHOICE_NOTES = __doc__
 # This is the only exogenous monetary assumption in the choice model. Vary it
 # with scaled_pack_costs() for the sensitivity analysis; +/-25% is the
 # recommended band.
+# The population's reference weight on money, utils per Rs. It anchors the wear
+# coefficient so that wear_internalisation is comparable ACROSS segments: a
+# segment with internalisation 2.5 really does weigh a rupee of battery wear
+# 2.5x as heavily as the reference customer weighs a rupee, regardless of how
+# price-sensitive that segment is. Numerically it is the balanced segment's
+# median_cost, which is what makes "1.00 = a rupee of wear feels like a rupee"
+# true for that segment by construction.
+REFERENCE_MONEY_WEIGHT = 0.020
+
 PACK_COST_RS_PER_KWH: dict[str, float] = {
     "LFP": 7850.0,
     "NMC": 12400.0,
@@ -128,12 +137,18 @@ class PreferenceDistribution:
     """
 
     median_cost: float = 0.020      # utils per Rs of charging cost
-    # Utils per Rs of battery wear, expressed as a MULTIPLE of median_cost.
-    # 1.0 = a rupee of pack capacity consumed feels exactly like a rupee spent
-    # on electricity. Below 1 discounts future battery cost against today's
-    # bill; above 1 over-weights it. This replaces the old free-floating
-    # median_health, whose scale was never examined and turned out to be
-    # meaningless once the underlying field changed.
+    # How many rupees a customer feels for each rupee of pack capacity consumed,
+    # measured on the POPULATION'S reference money scale (REFERENCE_MONEY_WEIGHT),
+    # not on this segment's own median_cost.
+    #
+    # Anchoring it to the segment's own cost weight was wrong and shipped once:
+    # b_wear = median_cost * internalisation gave health_driven (0.008 * 2.50)
+    # and balanced (0.020 * 1.00) the SAME absolute weight of 0.020, so a rupee
+    # of wear moved both identically and health_driven differed only by caring
+    # less about money. Measured consequence: health_driven wore batteries MORE
+    # than balanced in every pattern (48.9-59.0 Rs against 40.2-47.7 Rs).
+    # A segment that is defined by caring about battery life has to carry a
+    # larger ABSOLUTE weight on it, not merely a larger ratio to its own costs.
     wear_internalisation: float = 1.00
     median_delay: float = 0.25      # per hour of waiting
     median_soc: float = 4.00        # per unit target SOC (0-1)
@@ -146,7 +161,7 @@ class PreferenceDistribution:
     @property
     def median_wear(self) -> float:
         """Utils per Rs of wear. Derived, never set directly."""
-        return self.median_cost * self.wear_internalisation
+        return REFERENCE_MONEY_WEIGHT * self.wear_internalisation
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.wear_internalisation) or self.wear_internalisation <= 0.0:
