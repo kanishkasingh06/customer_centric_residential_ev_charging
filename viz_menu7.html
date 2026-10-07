@@ -1,0 +1,333 @@
+<title>Seven Distinct Schedules</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: a tariff rail, then a saving-vs-fade frontier scatter keyed by an
+   ordinal target ramp, then the seven schedules as small multiples grouped
+   by target tier — each a diverging net-power plot over an SOC strip. */
+:root {
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --baseline:#c3c2b7; --import:#2a78d6; --export:#e34948; --soc:#1baf7a;
+  --tariff:#898781; --tariff-fill:rgba(137,135,129,.13); --chip:#f0efec; --rule:#e1e0d9;
+  --tier-1:#86b6ef; --tier-2:#2a78d6; --tier-3:#104281; --ready:#898781;
+  --font-ui:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  --font-data:"IBM Plex Mono",ui-monospace,"SFMono-Regular",monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  color-scheme: dark;
+  --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --baseline:#383835; --import:#3987e5; --export:#e66767; --soc:#199e70;
+  --tariff:#898781; --tariff-fill:rgba(137,135,129,.18); --chip:#232321; --rule:#2c2c2a;
+  --tier-1:#b7d3f6; --tier-2:#6da7ec; --tier-3:#256abf; --ready:#898781;
+} }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --baseline:#383835; --import:#3987e5; --export:#e66767; --soc:#199e70;
+  --tariff:#898781; --tariff-fill:rgba(137,135,129,.18); --chip:#232321; --rule:#2c2c2a;
+  --tier-1:#b7d3f6; --tier-2:#6da7ec; --tier-3:#256abf; --ready:#898781;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font-family:var(--font-ui);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1180px;margin:0 auto;padding-inline:20px;padding-block:32px 56px}
+h1{font-size:27px;font-weight:600;letter-spacing:-.02em;margin:0 0 6px;text-wrap:balance}
+.lede{color:var(--ink-2);margin:0 0 18px;max-width:66ch}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:26px}
+.chip{font-family:var(--font-data);font-size:11.5px;padding:3px 9px;background:var(--chip);color:var(--ink-2);border-radius:3px;font-variant-numeric:tabular-nums}
+.chip b{color:var(--ink);font-weight:600}
+h2{font-size:11.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0 0 10px;padding-bottom:7px;border-bottom:1px solid var(--rule)}
+section{margin-bottom:30px}
+.card{background:var(--surface);border:1px solid var(--rule);border-radius:4px;padding:12px 14px 6px}
+.card-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:2px}
+.card-title{font-size:12.5px;font-weight:500}
+.card-note{font-family:var(--font-data);font-size:11px;color:var(--muted)}
+.tier-head{display:flex;align-items:center;gap:9px;margin:20px 0 10px}
+.tier-dot{width:12px;height:12px;border-radius:3px;flex:none}
+.tier-label{font-size:12.5px;font-weight:600}
+.tier-sub{font-family:var(--font-data);font-size:11px;color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+@media(max-width:940px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:620px){.grid{grid-template-columns:1fr}}
+.panel{background:var(--surface);border:1px solid var(--rule);border-radius:4px;padding:12px 14px 8px;min-width:0;display:flex;flex-direction:column}
+.p-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.p-name{font-size:13.5px;font-weight:600;margin:0}
+.p-rank{font-family:var(--font-data);font-size:11px;color:var(--muted)}
+.p-sub{font-size:11.5px;color:var(--muted);margin:1px 0 10px}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:11px}
+.stat-l{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+.stat-v{font-family:var(--font-data);font-size:15px;font-weight:500;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.stat-v small{font-size:10.5px;color:var(--ink-2);font-weight:400}
+.axis-note{font-family:var(--font-data);font-size:10px;color:var(--muted);margin:4px 0 0;display:flex;justify-content:space-between}
+svg{display:block;width:100%;height:auto;overflow:visible}
+.legend{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:0 0 14px;font-size:12px;color:var(--ink-2)}
+.key{display:inline-flex;align-items:center;gap:6px}
+.sw{width:11px;height:11px;border-radius:2px;flex:none}
+.sw.line{height:3px;border-radius:2px;width:15px}
+.sw.dash{height:0;width:15px;border-top:2px dashed var(--ready)}
+.tbl-wrap{overflow-x:auto;background:var(--surface);border:1px solid var(--rule);border-radius:4px}
+table{border-collapse:collapse;width:100%;font-family:var(--font-data);font-size:11.5px;font-variant-numeric:tabular-nums}
+th,td{padding:7px 11px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--rule)}
+th:first-child,td:first-child{text-align:left;font-family:var(--font-ui)}
+thead th{font-family:var(--font-ui);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:600}
+tbody tr:last-child td{border-bottom:0}
+.tip{position:fixed;pointer-events:none;z-index:20;opacity:0;transition:opacity .09s;background:var(--surface);border:1px solid var(--baseline);border-radius:4px;padding:7px 9px;font-family:var(--font-data);font-size:11px;line-height:1.55;box-shadow:0 4px 14px rgba(0,0,0,.14);font-variant-numeric:tabular-nums;color:var(--ink)}
+.tip b{font-weight:600}
+.tip .r{display:flex;justify-content:space-between;gap:14px}
+.foot{color:var(--muted);font-size:11.5px;margin-top:26px;padding-top:14px;border-top:1px solid var(--rule)}
+.foot code{font-family:var(--font-data);font-size:11px;color:var(--ink-2)}
+@media(prefers-reduced-motion:reduce){.tip{transition:none}}
+</style>
+
+<div class="wrap">
+  <h1>Seven Distinct Schedules</h1>
+  <p class="lede">
+    The menu generates 63 offers for this vehicle and session. Compaction and the Pareto filter
+    cut that to 14, but half of those are near-duplicates. Seven carry genuinely different
+    answers on all four attributes at once — ready-by time, target charge, saving and battery wear.
+    These are those seven.
+  </p>
+  <div class="chips" id="chips"></div>
+
+  <section>
+    <h2>Tariff over the session</h2>
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Energy price, repository weekly profile</span>
+        <span class="card-note" id="priceNote"></span>
+      </div>
+      <div id="tariff"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Saving against battery wear</h2>
+    <div class="legend" id="scatterLegend"></div>
+    <div class="card">
+      <div id="scatter"></div>
+    </div>
+    <p class="axis-note" style="margin-top:8px"><span>Each target tier is its own frontier. Moving along one trades money for wear; moving between them changes how much charge you get.</span></p>
+  </section>
+
+  <section>
+    <h2>The schedules</h2>
+    <div class="legend">
+      <span class="key"><span class="sw" style="background:var(--import)"></span>Import</span>
+      <span class="key"><span class="sw" style="background:var(--export)"></span>Export</span>
+      <span class="key"><span class="sw line" style="background:var(--soc)"></span>State of charge</span>
+      <span class="key"><span class="sw dash"></span>Ready-by — no export after this point</span>
+    </div>
+    <div id="tiers"></div>
+  </section>
+
+  <section>
+    <h2>All seven</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Option</th><th>Ready by</th><th>Target</th><th>Saving</th><th>Cost</th>
+          <th>Fade</th><th>Cycle fade</th><th>Import</th><th>Export</th><th>EFC</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="foot" id="foot"></p>
+</div>
+<div class="tip" id="tip" role="status" aria-live="polite"></div>
+
+<script>
+const D = __DATA__;
+const M = D.meta, mins = D.minutes, price = D.price, N = mins.length, STEP = M.timestep_minutes;
+const KW = 7.2, SOC_LO = 15, SOC_HI = 100;
+const hhmm = m => String(Math.floor((m%1440)/60)).padStart(2,"0")+":"+String(m%60).padStart(2,"0");
+const el = (n,a) => { const e=document.createElementNS("http://www.w3.org/2000/svg",n);
+  for(const k in a) e.setAttribute(k,a[k]); return e; };
+const tip = document.getElementById("tip");
+
+const TIERS = [...new Set(D.schedules.map(s=>s.target_pct))].sort((a,b)=>a-b);
+const tierVar = t => "var(--tier-"+(TIERS.indexOf(t)+1)+")";
+
+document.getElementById("chips").innerHTML = [
+  ["Vehicle", M.ev], ["Pack", M.pack], ["Plugged in", M.session],
+  ["Arrival", M.arrival_soc_pct+"%"],
+  ["Service minimum", M.service_minimum_pct+"%  (trip + buffer + "+M.reserve_pct+"% reserve)"],
+  ["Export", M.discharge_kw+" kW · "+M.allowance_kwh+" kWh cap"],
+  ["Sell price", (M.sell_ratio*100)+"% of buy"],
+  ["Funnel", M.funnel.join(" → ")]
+].map(([k,v])=>`<span class="chip">${k} <b>${v}</b></span>`).join("");
+document.getElementById("priceNote").textContent =
+  Math.min(...price).toFixed(2)+" – "+Math.max(...price).toFixed(2)+" per kWh";
+document.getElementById("scatterLegend").innerHTML =
+  TIERS.map(t=>`<span class="key"><span class="sw" style="background:${tierVar(t)}"></span>Target ${t}%</span>`).join("")
+  + `<span class="key" style="color:var(--muted)">Point labels are option numbers</span>`;
+
+const PAD_L = 32, PAD_R = 10;
+const xAt = (i,w) => PAD_L + (w-PAD_L-PAD_R)*(i/N);
+const bandW = w => (w-PAD_L-PAD_R)/N;
+
+/* tariff rail */
+(function(){
+  const w=1000,h=92,top=10,bot=h-20, pmax=Math.max(...price);
+  const y=p=>bot-(bot-top)*(p/pmax);
+  const s=el("svg",{viewBox:`0 0 ${w} ${h}`,role:"img","aria-label":"Tariff over the session"});
+  let d=`M ${xAt(0,w)} ${bot}`;
+  for(let i=0;i<N;i++) d+=` L ${xAt(i,w)} ${y(price[i])} L ${xAt(i+1,w)} ${y(price[i])}`;
+  d+=` L ${xAt(N,w)} ${bot} Z`;
+  s.appendChild(el("path",{d,fill:"var(--tariff-fill)"}));
+  let l="";
+  for(let i=0;i<N;i++) l+=(i?" L":"M")+` ${xAt(i,w)} ${y(price[i])} L ${xAt(i+1,w)} ${y(price[i])}`;
+  s.appendChild(el("path",{d:l,fill:"none",stroke:"var(--tariff)","stroke-width":2,"stroke-linejoin":"round"}));
+  for(let i=0;i<=N;i+=4){ const t=el("text",{x:xAt(i,w),y:h-5,"text-anchor":"middle",
+    fill:"var(--muted)","font-size":11,"font-family":"var(--font-data)"});
+    t.textContent=hhmm(mins[0]+i*STEP); s.appendChild(t); }
+  [pmax,pmax/2].forEach(v=>{ const t=el("text",{x:PAD_L-6,y:y(v)+4,"text-anchor":"end",
+    fill:"var(--muted)","font-size":11,"font-family":"var(--font-data)"});
+    t.textContent=v.toFixed(1); s.appendChild(t); });
+  s.appendChild(el("line",{x1:PAD_L,y1:bot,x2:w-PAD_R,y2:bot,stroke:"var(--baseline)","stroke-width":1}));
+  document.getElementById("tariff").appendChild(s);
+})();
+
+/* saving vs fade scatter */
+(function(){
+  const w=1000,h=300,L=58,R=18,T=18,B=42;
+  const S=D.schedules.map(s=>s.saving), F=D.schedules.map(s=>s.fade_pct);
+  const sMax=Math.ceil(Math.max(...S)/20)*20, fMin=0.0025, fMax=Math.ceil(Math.max(...F)*1e4)/1e4;
+  const x=v=>L+(w-L-R)*(v/sMax), y=v=>h-B-(h-B-T)*((v-fMin)/(fMax-fMin));
+  const s=el("svg",{viewBox:`0 0 ${w} ${h}`,role:"img","aria-label":"Saving against capacity fade for the seven options"});
+  for(let g=0;g<=4;g++){ const v=fMin+(fMax-fMin)*g/4;
+    s.appendChild(el("line",{x1:L,y1:y(v),x2:w-R,y2:y(v),stroke:"var(--grid)","stroke-width":1}));
+    const t=el("text",{x:L-8,y:y(v)+4,"text-anchor":"end",fill:"var(--muted)","font-size":11,"font-family":"var(--font-data)"});
+    t.textContent=(v*1000).toFixed(2); s.appendChild(t); }
+  for(let g=0;g<=sMax;g+=20){
+    const t=el("text",{x:x(g),y:h-B+18,"text-anchor":"middle",fill:"var(--muted)","font-size":11,"font-family":"var(--font-data)"});
+    t.textContent=g; s.appendChild(t); }
+  s.appendChild(el("line",{x1:L,y1:h-B,x2:w-R,y2:h-B,stroke:"var(--baseline)","stroke-width":1}));
+  TIERS.forEach(tier=>{
+    const pts=D.schedules.filter(p=>p.target_pct===tier).sort((a,b)=>a.saving-b.saving);
+    if(pts.length>1){ let d="";
+      pts.forEach((p,i)=>{ d+=(i?" L":"M")+` ${x(p.saving)} ${y(p.fade_pct)}`; });
+      s.appendChild(el("path",{d,fill:"none",stroke:tierVar(tier),"stroke-width":2,opacity:.45,"stroke-linecap":"round"})); }
+  });
+  D.schedules.forEach(p=>{
+    s.appendChild(el("circle",{cx:x(p.saving),cy:y(p.fade_pct),r:8,fill:"var(--surface)"}));
+    s.appendChild(el("circle",{cx:x(p.saving),cy:y(p.fade_pct),r:6,fill:tierVar(p.target_pct)}));
+    const t=el("text",{x:x(p.saving),y:y(p.fade_pct)-13,"text-anchor":"middle",
+      fill:"var(--ink-2)","font-size":11.5,"font-family":"var(--font-data)","font-weight":600});
+    t.textContent=p.rank; s.appendChild(t);
+  });
+  const xl=el("text",{x:(L+w-R)/2,y:h-4,"text-anchor":"middle",fill:"var(--muted)","font-size":11,"font-family":"var(--font-data)"});
+  xl.textContent="saving over business as usual"; s.appendChild(xl);
+  const yl=el("text",{x:14,y:(T+h-B)/2,"text-anchor":"middle",fill:"var(--muted)","font-size":11,
+    "font-family":"var(--font-data)",transform:`rotate(-90 14 ${(T+h-B)/2})`});
+  yl.textContent="capacity fade, % × 10⁻³"; s.appendChild(yl);
+  document.getElementById("scatter").appendChild(s);
+})();
+
+/* schedule panels, grouped by target tier */
+function panel(p){
+  const d=document.createElement("div"); d.className="panel";
+  d.innerHTML=`
+    <div class="p-head"><p class="p-name">Ready by ${hhmm(p.ready_minute)}</p>
+      <span class="p-rank">option ${p.rank}</span></div>
+    <p class="p-sub">${p.export_kwh>0.01?`exports ${p.export_kwh.toFixed(1)} kWh into the evening peak`:"charge only"}</p>
+    <div class="stats">
+      <div><div class="stat-l">Saving</div><div class="stat-v">${p.saving.toFixed(0)}</div></div>
+      <div><div class="stat-l">Fade</div><div class="stat-v">${p.fade_pct.toFixed(4)}<small>%</small></div></div>
+      <div><div class="stat-l">Cycles</div><div class="stat-v">${p.efc.toFixed(3)}<small> EFC</small></div></div>
+    </div>`;
+  const w=420,hP=118,gap=16,hS=46,h=hP+gap+hS+16;
+  const zeroY=12+(hP-24)/2, half=(hP-24)/2;
+  const yKW=v=>zeroY-half*(v/KW);
+  const sTop=hP+gap, sBot=sTop+hS;
+  const ySOC=v=>sBot-hS*((v-SOC_LO)/(SOC_HI-SOC_LO));
+  const s=el("svg",{viewBox:`0 0 ${w} ${h}`,role:"img","aria-label":`Schedule ready by ${hhmm(p.ready_minute)}`});
+
+  const rx=xAt(p.ready_local,w);
+  s.appendChild(el("rect",{x:rx,y:6,width:Math.max(0,w-PAD_R-rx),height:sBot-6,
+    fill:"var(--muted)",opacity:.07}));
+  [KW,KW/2,-KW/2,-KW].forEach(v=>s.appendChild(el("line",{x1:PAD_L,y1:yKW(v),x2:w-PAD_R,y2:yKW(v),
+    stroke:"var(--grid)","stroke-width":1})));
+  const bw=bandW(w), ins=Math.min(1,bw*.12);
+  for(let i=0;i<N;i++){ const v=p.net_kw[i]; if(Math.abs(v)<1e-6) continue;
+    const yv=yKW(v);
+    s.appendChild(el("rect",{x:xAt(i,w)+ins,y:Math.min(yv,zeroY),width:Math.max(bw-2*ins,.6),
+      height:Math.max(Math.abs(yv-zeroY),1),rx:Math.min(2.5,bw/3),
+      fill:v>0?"var(--import)":"var(--export)"})); }
+  s.appendChild(el("line",{x1:PAD_L,y1:zeroY,x2:w-PAD_R,y2:zeroY,stroke:"var(--baseline)","stroke-width":1.5}));
+  [KW,-KW].forEach(v=>{ const t=el("text",{x:PAD_L-6,y:yKW(v)+4,"text-anchor":"end",
+    fill:"var(--muted)","font-size":10.5,"font-family":"var(--font-data)"});
+    t.textContent=(v>0?"+":"")+v; s.appendChild(t); });
+
+  s.appendChild(el("line",{x1:PAD_L,y1:sBot,x2:w-PAD_R,y2:sBot,stroke:"var(--grid)","stroke-width":1}));
+  s.appendChild(el("line",{x1:PAD_L,y1:ySOC(p.target_pct),x2:w-PAD_R,y2:ySOC(p.target_pct),
+    stroke:tierVar(p.target_pct),"stroke-width":1.5,"stroke-dasharray":"4 3",opacity:.8}));
+  let sd=""; for(let i=0;i<=N;i++) sd+=(i?" L":"M")+` ${xAt(i,w)} ${ySOC(p.soc[i])}`;
+  s.appendChild(el("path",{d:sd,fill:"none",stroke:"var(--soc)","stroke-width":2.2,
+    "stroke-linejoin":"round","stroke-linecap":"round"}));
+  [[SOC_HI,"100"],[p.target_pct,p.target_pct+"%"]].forEach(([v,lab])=>{
+    const t=el("text",{x:PAD_L-6,y:ySOC(v)+4,"text-anchor":"end",fill:"var(--muted)",
+      "font-size":10.5,"font-family":"var(--font-data)"}); t.textContent=lab; s.appendChild(t); });
+
+  s.appendChild(el("line",{x1:rx,y1:6,x2:rx,y2:sBot,stroke:"var(--ready)","stroke-width":1.5,
+    "stroke-dasharray":"3 3"}));
+  for(let i=0;i<=N;i+=8){ const t=el("text",{x:xAt(i,w),y:h-2,"text-anchor":"middle",
+    fill:"var(--muted)","font-size":10.5,"font-family":"var(--font-data)"});
+    t.textContent=hhmm(mins[0]+i*STEP); s.appendChild(t); }
+
+  const cross=el("line",{x1:0,y1:6,x2:0,y2:sBot,stroke:"var(--muted)","stroke-width":1,opacity:0});
+  s.appendChild(cross);
+  const hit=el("rect",{x:PAD_L,y:0,width:w-PAD_L-PAD_R,height:h,fill:"transparent",style:"cursor:crosshair"});
+  s.appendChild(hit);
+  hit.addEventListener("pointermove",ev=>{
+    const r=s.getBoundingClientRect();
+    const i=Math.max(0,Math.min(N-1,Math.floor(((ev.clientX-r.left)/r.width*w-PAD_L)/bandW(w))));
+    cross.setAttribute("x1",xAt(i,w)+bandW(w)/2); cross.setAttribute("x2",xAt(i,w)+bandW(w)/2);
+    cross.setAttribute("opacity",.5);
+    const v=p.net_kw[i];
+    tip.innerHTML=`<b>${hhmm(mins[i])}</b>`+
+      `<div class="r"><span>Price</span><span>${price[i].toFixed(2)}</span></div>`+
+      `<div class="r"><span>${v<0?"Export":"Import"}</span><span>${Math.abs(v).toFixed(2)} kW</span></div>`+
+      `<div class="r"><span>SOC</span><span>${p.soc[i].toFixed(1)}%</span></div>`;
+    tip.style.opacity=1;
+    tip.style.left=Math.min(window.innerWidth-tip.offsetWidth-8,Math.max(8,ev.clientX+14))+"px";
+    tip.style.top=Math.max(8,ev.clientY-tip.offsetHeight-12)+"px";
+  });
+  hit.addEventListener("pointerleave",()=>{tip.style.opacity=0;cross.setAttribute("opacity",0);});
+  d.appendChild(s);
+  const note=document.createElement("p"); note.className="axis-note";
+  note.innerHTML=`<span>net kW</span><span>${p.soc[0].toFixed(0)}% → ${p.soc[N].toFixed(0)}%</span>`;
+  d.appendChild(note);
+  return d;
+}
+
+const tiersBox=document.getElementById("tiers");
+TIERS.forEach(tier=>{
+  const head=document.createElement("div"); head.className="tier-head";
+  const items=D.schedules.filter(s=>s.target_pct===tier).sort((a,b)=>b.saving-a.saving);
+  head.innerHTML=`<span class="tier-dot" style="background:${tierVar(tier)}"></span>`+
+    `<span class="tier-label">Target ${tier}%</span>`+
+    `<span class="tier-sub">${items.length} option${items.length>1?"s":""} · `+
+    `saving ${Math.min(...items.map(i=>i.saving)).toFixed(0)}–${Math.max(...items.map(i=>i.saving)).toFixed(0)} · `+
+    `fade ${Math.min(...items.map(i=>i.fade_pct)).toFixed(5)}–${Math.max(...items.map(i=>i.fade_pct)).toFixed(5)}%</span>`;
+  tiersBox.appendChild(head);
+  const g=document.createElement("div"); g.className="grid";
+  items.forEach(p=>g.appendChild(panel(p)));
+  tiersBox.appendChild(g);
+});
+
+document.getElementById("tbody").innerHTML=[...D.schedules].sort((a,b)=>a.rank-b.rank).map(p=>
+  `<tr><td>${p.rank}</td>`+[hhmm(p.ready_minute),p.target_pct+"%",p.saving.toFixed(2),
+   p.cost.toFixed(2),p.fade_pct.toFixed(5)+"%",p.cycle_pct.toFixed(5)+"%",
+   p.import_kwh.toFixed(2),p.export_kwh.toFixed(2),p.efc.toFixed(3)]
+   .map(v=>`<td>${v}</td>`).join("")+"</tr>").join("");
+
+document.getElementById("foot").innerHTML=
+  `Selected by greedy farthest-point over the four attributes, each normalised across the displayed `+
+  `menu and scored by L∞ — a pair counts as close only when it is close on every axis. Minimum `+
+  `separation holds at ${M.separation} through seven and drops to 0.239 at eight. Shading marks the `+
+  `period after the ready-by time, where export is not permitted: once the car is advertised as `+
+  `ready its charge is not for sale. Every option delivers its stated target at its stated time, so `+
+  `the differences are in price and wear, never in service.`;
+</script>
