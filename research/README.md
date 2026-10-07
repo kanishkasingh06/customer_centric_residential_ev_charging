@@ -57,14 +57,22 @@ stale copy around.
 Customer `n` facing menu offers `j` draws a personal taste vector and maximises
 
 ```
-U_nj = -b_cost·cost_j + b_health·health_j - b_delay·delay_j + b_soc·target_j + eps_nj
+U_nj = -b_cost·cost_j - b_wear·wear_j - b_delay·delay_j + b_soc·target_j + eps_nj
 ```
 
 with `eps ~ iid Gumbel(0,1)`, giving conditional-logit probabilities for that
 draw. All four coefficients are drawn per customer from lognormal population
-distributions, so signs are guaranteed and choice diversity comes from
-preference heterogeneity rather than Gumbel noise — this is a mixed logit, and
-the heterogeneity is what the headline result turns on.
+distributions, so signs are guaranteed.
+
+`wear_j` is **money**: `battery_stress x usable_battery_kwh x pack_cost_per_kwh`,
+the rupees of pack capacity a session consumes. `b_wear` is therefore in the
+same units as `b_cost`, and the segments differ by `wear_internalisation` — how
+many rupees a customer feels per rupee of capacity consumed, on a common
+reference money scale. See `choice.py` for the pack costs and their source.
+
+The choice set is the displayed menu **plus** the same-target BAU references,
+so declining to charge is always available. Reading the displayed offers alone
+removes that option and forces every customer to accept an optimised offer.
 
 Four preference mixes (`balanced`, `cost_driven`, `health_driven`,
 `convenience_driven`) are swept against three arrival patterns
@@ -75,66 +83,50 @@ environment, not a factor.
 Menus depend only on the physical request, never on preferences or fleet size,
 so one menu bank serves the whole sweep.
 
-## Results, 150 vehicles, seed-averaged
+## Results
 
-| arrivals | preference | peak kW | at | kWh | coinc. | Rs/cust | health | no charge |
-|---|---|---|---|---|---|---|---|---|
-| concentrated | cost-driven | 157.2 | 03:00 | 460 | 0.44 | 19.9 | 95.8 | 62% |
-| concentrated | balanced | 253.0 | 20:00 | 1056 | 0.50 | 55.3 | 83.5 | 50% |
-| concentrated | health-driven | 253.9 | 20:00 | 792 | 0.56 | 45.8 | 89.0 | 55% |
-| concentrated | convenience-driven | 362.3 | 20:00 | 1286 | 0.63 | 80.0 | 78.4 | 44% |
-| dispersed | balanced | 192.7 | 22:00 | 1162 | 0.36 | 55.2 | 81.0 | 47% |
-| bimodal | balanced | 203.5 | 22:00 | 1199 | 0.37 | 54.3 | 80.1 | 46% |
+**No numbers are reproduced here.** They live in the files the pipeline
+generates — `results.json` (108 cells), `counterfactual.json`, and the
+dashboard — and are regenerated rather than committed, for the reason given
+above.
 
-### Findings
+Earlier versions of this README carried a results table and a findings list.
+Every figure in them was produced before the midnight-wraparound, choice-set
+and wear-term fixes, and all of them are superseded. They were removed rather
+than updated: a hardcoded results table in a README has exactly the same
+failure mode as a committed `results.json`, and this one had already drifted
+three code versions behind the tree it documents.
 
-1. **Preference mix moves the peak 2.3x and shifts it 7 hours** (157 kW at
-   03:00 to 362 kW at 20:00) at fixed fleet size and tariff.
-2. **Price response relocates the peak, it does not remove it.** Cost-driven
-   customers desert 19:00–21:00 and re-synchronise on the overnight trough,
-   building a fresh ~125 kW spike at 03:00.
-3. **Cost and battery health are aligned, not opposed.** Cost-driven customers
-   post the highest mean health (95.8) and the lowest spend — both follow from
-   choosing a lower target SOC. The real tension is cost+health against
-   range+convenience.
-4. **43–62% of plugged-in vehicles draw nothing**, their existing charge
-   already covering tomorrow's trip plus buffer.
-5. **Arrival dispersion is the cheapest peak lever:** −24% peak at identical
-   energy, coincidence factor 0.50 → 0.36.
+What the sweep reports per cell: peak kW and when, delivered energy,
+coincidence factor, mean cost, mean wear in rupees, mean target SOC, the share
+of customers who decline to charge, and mean ready delay.
+
+The one finding that is a structural property of the menu rather than a
+simulation output, and so is quoted here: **`advertised_saving` is measured
+against a per-target BAU baseline**, so a higher target carries a larger
+achievable saving. `argmax(saving)` picks the 100% target in 128 of 148 menus
+and is the cheapest offer in 3. A customer optimising the "you save Rs X"
+column is steered toward maximum consumption. `counterfactual.py` measures this
+on every run.
 
 ### Reference policies (`counterfactual.py`)
 
-Against uncontrolled charging at the *same* targets, so only timing differs:
+Four deterministic policies on the same fleets and menus as the sweep:
 
-| arrivals | uncontrolled | max-saving | change |
-|---|---|---|---|
-| concentrated | 1,057 kW @ 20:00 | 1,066 kW @ 02:00 | +0.8% |
-| dispersed | 749 kW @ 20:30 | 1,046 kW @ 02:00 | **+39.7%** |
-| bimodal | 659 kW @ 22:00 | 1,056 kW @ 02:00 | **+60.2%** |
+* `uncontrolled` — the same-target BAU for each customer's max-saving offer.
+  Identical delivered energy, so `max_saving` vs `uncontrolled` isolates
+  timing. It is taken from `bau_reference_offers` and **raises** if the
+  matching target is missing; it used to fall back to the max-saving offer,
+  which silently made the two policies the same selection.
+* `max_saving` — every customer takes the highest-saving offer.
+* `min_cost` — every customer takes the cheapest **displayed** offer.
+* `best_health` — the displayed offer with the least battery stress.
 
-Every deterministic policy drives the coincidence factor to ~1.0. Perfect price
-response synchronises the fleet on the tariff trough and, where arrivals were
-naturally diverse, makes the peak substantially **worse**. The mixed-logit
-cells hold the coincidence factor at 0.33–0.63 purely through preference
-heterogeneity. Modelling the population as homogeneous price-optimisers
-overstates feeder stress by roughly 4x.
+`min_cost` and `best_health` range over displayed offers only. They
+characterise the menu, and over the full choice set both collapse to "decline
+to charge" — true, but silent about menu design.
 
-**The saving column is not a cost ranking.** `advertised_saving` uses a
-per-target BAU baseline, so `argmax(saving)` picks the 100% target in the large
-majority of menus and is never the cheapest offer — a customer optimising the
-"you save Rs X" number is steered to maximum consumption. See `CLAUDE.md`.
-
-## Verification (`verify.py`, all passing)
-
-- raster energy equals source offer energy to 7.1e-15 kWh
-- no charging at or after any ready time, across 708 offers
-- choice probabilities normalise to 6.7e-16
-- peak load varies 2.3% across seeds
-- dropping request quantisation moves peak 4.1%, energy 2.8%
-
-## Limits
-
-Coefficients are **illustrative research assumptions**, not estimated from
-revealed- or stated-preference data; no willingness-to-pay figure derived from
-them is empirical. Single weekday, single tariff, no seasonal or weekend
-variation, no multi-day battery-state coupling, fleet sizes capped at 150.
+Note when reading the output: the choice-model rows deliver far less energy
+than the policy rows, because a large share of customers decline to charge.
+Their "vs uncontrolled" percentages therefore mix a timing effect with an
+energy difference and are not a like-for-like comparison.
