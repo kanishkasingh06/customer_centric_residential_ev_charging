@@ -11,6 +11,7 @@ much of their consent an offer spends, but it is not a dominance axis.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import ceil
 
 from evmenu.degradation import DegradationSettings
 from evmenu.schemas import ChargingSession, EVSpec, PlanningSignal
@@ -87,16 +88,42 @@ def bau_cost_for(
     return cost
 
 
-def candidate_targets(
-    *, ev: EVSpec, session: ChargingSession, standard: tuple[float, ...] = (0.8, 0.9, 1.0)
-) -> list[float]:
-    """Standard tiers plus the trip's own personalised minimum."""
-    minimum = (
+def service_minimum_soc(
+    *, ev: EVSpec, session: ChargingSession, reserve_soc: float
+) -> float:
+    """The lowest SOC that is a defensible service promise.
+
+    ``(trip energy + buffer) / B_max + beta``.  The trip and its buffer are
+    what the customer needs to *use*; the reserve floor is what they are
+    never asked to dip into.  Stacking them is the point: a target that
+    covers only the trip leaves the car at the reserve floor on arrival at
+    the far end, with nothing in hand.
+    """
+    usable = (
         session.commute_energy_kwh + session.buffer_energy_kwh
     ) / ev.battery_capacity_kwh
-    targets = {round(min(1.0, max(0.0, minimum)), 6)}
+    return min(1.0, max(0.0, usable + max(0.0, reserve_soc)))
+
+
+def candidate_targets(
+    *,
+    ev: EVSpec,
+    session: ChargingSession,
+    reserve_soc: float,
+    standard: tuple[float, ...] = (0.8, 1.0),
+) -> list[float]:
+    """The trip-aware service minimum, plus the standard tiers above it."""
+    minimum = service_minimum_soc(
+        ev=ev, session=session, reserve_soc=reserve_soc
+    )
+    # Round the service minimum UP, never to nearest: a displayed target that
+    # rounds below its own floor promises very slightly less than the floor
+    # it was derived from.
+    quantised = min(1.0, ceil(minimum * 1e6) / 1e6)
+    targets = {quantised}
     for value in standard:
-        targets.add(round(value, 6))
+        if value >= minimum - 1e-9:
+            targets.add(round(value, 6))
     return sorted(t for t in targets if 0.0 <= t <= 1.0)
 
 
@@ -162,7 +189,9 @@ def generate_offers(
     """Generate every feasible offer across the request space."""
     offers: list[V2GOffer] = []
     starts = signal.interval_start_minutes
-    for target in candidate_targets(ev=ev, session=session):
+    for target in candidate_targets(
+        ev=ev, session=session, reserve_soc=envelope.reserve_soc
+    ):
         probe = RequestContext(
             ev=ev,
             session=session,

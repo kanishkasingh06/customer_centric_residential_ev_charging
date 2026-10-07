@@ -113,7 +113,8 @@ tbody tr.ref td { color: var(--ink-2); }
   <p class="lede">
     One vehicle, one overnight session, one service request &mdash; ready by 08:00 at 80% state of charge.
     Six objectives, six completely different ways to get there. Every trace below is a solved
-    trajectory from <code>evmenu_v2g</code>, not a sketch.
+    trajectory from <code>evmenu_v2g</code> against the repository's own weekly tariff, not a sketch.
+    Export stops at the ready-by time: once the car is advertised as ready, its charge is not for sale.
   </p>
   <div class="chips" id="chips"></div>
 
@@ -182,8 +183,10 @@ document.getElementById("chips").innerHTML = [
   ["Pack", M.pack_age_years + " yr · " + M.accumulated_fec + " EFC"],
   ["Plugged in", M.session],
   ["Arrival → target", M.arrival_soc_pct + "% → " + M.target_soc_pct + "%"],
+  ["Service minimum", M.service_minimum_pct + "%  (trip + buffer + " + M.reserve_soc_pct_decl + "% reserve)"],
   ["Export limit", M.discharge_kw + " kW · " + M.allowance_kwh + " kWh · floor " + M.reserve_soc_pct + "%"],
-  ["Sell price", (M.sell_ratio * 100) + "% of buy"]
+  ["Sell price", (M.sell_ratio * 100) + "% of buy"],
+  ["Tariff", M.tariff]
 ].map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
 
 document.getElementById("priceNote").textContent =
@@ -370,5 +373,7 @@ document.getElementById("foot").innerHTML =
   `Every trajectory satisfies the same terminal guarantee of ${M.terminal_kwh} kWh at departure, so all six ` +
   `deliver identical mobility. Fade is incremental capacity loss over this one session, from the ` +
   `semi-empirical calendar-plus-cycle model; EFC counts equivalent full cycles at ` +
-  `2&nbsp;&times;&nbsp;capacity of battery-side throughput. Tariff is illustrative, not a regulated schedule.`;
+  `2&nbsp;&times;&nbsp;capacity of battery-side throughput. The lowest selectable target is the ` +
+  `service minimum &mdash; next trip plus buffer plus the reserve floor &mdash; so no offer can ` +
+  `leave the car unable to make the journey. Tariff is the repository's weekly hour-of-week profile.`;
 </script>

@@ -99,9 +99,14 @@ def capacities(ctx: RequestContext) -> tuple[list[float], list[float]]:
     # parameterization as the unidirectional path, and the regression test
     # compares the two bitwise.
     enabled = ctx.envelope.enabled
+    ready_local = max(0, min(ctx.n, ctx.ready_step - ctx.session.arrival_step))
     cap_out: list[float] = []
     for index, duration in enumerate(durations):
         allowed = enabled
+        if allowed and not ctx.envelope.allow_export_after_ready and index >= ready_local:
+            # Once the advertised ready-by time has passed the customer has
+            # been told the car is ready; do not sell out of that window.
+            allowed = False
         if allowed and window is not None:
             starts = ctx.signal.interval_start_minutes
             if starts is not None:

@@ -36,6 +36,7 @@ from .menu import (
     generate_offers,
     pareto_filter,
     saving_levels,
+    service_minimum_soc,
 )
 from .trajectory import (
     RequestContext,
@@ -77,6 +78,7 @@ __all__ = [
     "pareto_filter",
     "peak_c_rate",
     "saving_levels",
+    "service_minimum_soc",
     "soc_excursion",
     "solve",
     "throughput_fraction",

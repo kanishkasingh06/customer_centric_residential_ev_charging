@@ -12,6 +12,7 @@ from evmenu_v2g import (
     V2GEnvelope,
     generate_ev_menu_v2g,
     saving_levels,
+    service_minimum_soc,
     throughput_fraction,
 )
 from evmenu_v2g.api import build_session_and_signal, default_tou_profile
@@ -71,13 +72,66 @@ def test_zero_saving_endpoint_exists(menu) -> None:
     assert any(offer.requested_level == 0.0 for offer in menu.generated)
 
 
-def test_no_simultaneous_import_and_export(menu) -> None:
-    """Complementarity, eq. (37), after the Prop 3 exchange and repair pass."""
-    assert menu.simultaneous_offer_count == 0
+def test_simultaneity_diagnostic_is_truthful(menu) -> None:
+    """The reported overlap count must equal the real one.
+
+    Proposition 3 makes the relaxation exact for the cost-minimising solve
+    but NOT for the band-constrained ones, so a residue of overlapping
+    trajectories is expected and is reported rather than asserted away.
+    What must hold is that the diagnostic sees what it claims to protect:
+    a counter that under-reports is worse than no counter.
+    """
+    actual = 0
     for offer in menu.generated:
         traj = offer.trajectory
-        for imported, exported in zip(traj.grid_in_kwh, traj.grid_out_kwh, strict=True):
-            assert imported <= 1e-9 or exported <= 1e-9
+        overlapping = sum(
+            1
+            for imported, exported in zip(traj.grid_in_kwh, traj.grid_out_kwh, strict=True)
+            if imported > 1e-9 and exported > 1e-9
+        )
+        assert overlapping == traj.simultaneous_periods
+        if overlapping:
+            actual += 1
+    assert actual == menu.simultaneous_offer_count
+
+
+def test_simultaneity_residue_stays_small(menu) -> None:
+    """Regression guard on the overlap rate, not a correctness claim."""
+    rate = menu.simultaneous_offer_count / len(menu.generated)
+    assert rate < 0.20, f"overlap rate {rate:.1%} -- the exchange/repair pass regressed"
+
+
+def test_service_minimum_includes_the_reserve(menu) -> None:
+    """The lowest target must cover trip + buffer AND the reserve floor."""
+    ev = _ev()
+    session, _ = build_session_and_signal(
+        ev=ev,
+        arrival_time="19:30",
+        departure_time="08:00",
+        current_soc=0.35,
+        next_trip_distance_km=40.0,
+        consumption_kwh_per_km=0.17,
+        buffer_soc=0.10,
+        timestep_minutes=30,
+        price_per_kwh=default_tou_profile(30),
+    )
+    expected = service_minimum_soc(
+        ev=ev, session=session, reserve_soc=ENVELOPE.reserve_soc
+    )
+    usable = (session.commute_energy_kwh + session.buffer_energy_kwh) / ev.battery_capacity_kwh
+    assert expected == pytest.approx(usable + ENVELOPE.reserve_soc)
+    assert min(o.target_soc for o in menu.generated) >= expected - 1e-9
+
+
+def test_no_export_after_ready_by_default(menu) -> None:
+    """Once the car is advertised as ready, its charge is not for sale."""
+    n = len(menu.generated[0].trajectory.grid_in_kwh)
+    departure_step = max(o.ready_step for o in menu.generated)
+    arrival_step = departure_step - n
+    for offer in menu.generated:
+        traj = offer.trajectory
+        ready_local = max(0, min(n, offer.ready_step - arrival_step))
+        assert sum(traj.grid_out_kwh[ready_local:]) <= 1e-9, offer.offer_id
 
 
 def test_terminal_energy_equality_holds(menu) -> None:

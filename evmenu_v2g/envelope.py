@@ -52,6 +52,18 @@ class V2GEnvelope:
         Optional ``(start_minute, end_minute)`` clock window, inclusive of
         start and exclusive of end, within which export is permitted.
         ``None`` permits export throughout the connected session.
+    allow_export_after_ready:
+        Whether export may continue once the advertised ready-by time has
+        passed.  Default ``False``.  The availability constraint alone only
+        forbids dropping *below* the target, so with export permitted after
+        ready-by the operator may charge past the target and sell the
+        surplus back, approaching the promised SOC from above in the last
+        hour before departure.  That is profitable and stays within the
+        advertised guarantee, but it spends battery life inside the window
+        the customer was told their car is ready, so it is off unless asked
+        for.  Note that it has no effect on an offer whose ready-by time is
+        the departure itself: there is no "after" to restrict, and such an
+        offer's only guarantee is the terminal equality.
     """
 
     discharge_power_kw: float = 0.0
@@ -60,6 +72,7 @@ class V2GEnvelope:
     departure_floor_soc: float | None = None
     session_export_allowance_kwh: float | None = None
     export_window: tuple[int, int] | None = None
+    allow_export_after_ready: bool = False
 
     def __post_init__(self) -> None:
         power = _finite("discharge_power_kw", self.discharge_power_kw)

@@ -13,7 +13,8 @@ from evmenu.degradation import DegradationSettings
 from evmenu.schemas import EVSpec
 
 from evmenu_v2g import V1G_ENVELOPE, V2GEnvelope
-from evmenu_v2g.api import build_session_and_signal, default_tou_profile
+from evmenu.pricing import load_weekly_price_profile_csv
+from evmenu_v2g.api import build_session_and_signal
 from evmenu_v2g.menu import bau_cost_for, saving_levels
 from evmenu_v2g.trajectory import RequestContext, evaluate, solve, warm_start
 
@@ -22,13 +23,18 @@ MODEL = "generic_60kwh_nmc"
 ARRIVAL, DEPARTURE = "19:30", "08:00"
 CURRENT_SOC = 0.35
 TRIP_KM = 40.0
-TARGET = 0.80
+TARGET = 0.80  # the 80% tier; the service minimum is reported separately
+
+TARIFF_CSV = "data/hourly_tariff.csv"
+ARRIVAL_DAY = "Wed"
+RESERVE = 0.20
 
 V2G = V2GEnvelope(
     discharge_power_kw=7.2,
     discharge_efficiency=0.93,
-    reserve_soc=0.25,
+    reserve_soc=RESERVE,
     session_export_allowance_kwh=15.0,
+    allow_export_after_ready=False,
 )
 
 
@@ -42,7 +48,7 @@ def build():
         charging_efficiency=model.charging_efficiency,
         chemistry=model.chemistry,
     )
-    prices = default_tou_profile(TIMESTEP)
+    weekly = load_weekly_price_profile_csv(TARIFF_CSV, profile_format="hour_of_week")
     session, signal = build_session_and_signal(
         ev=ev,
         arrival_time=ARRIVAL,
@@ -52,7 +58,8 @@ def build():
         consumption_kwh_per_km=model.consumption_kwh_per_km,
         buffer_soc=0.10,
         timestep_minutes=TIMESTEP,
-        price_per_kwh=prices,
+        weekly_profile=weekly,
+        arrival_day=ARRIVAL_DAY,
         battery_temperature_c=25.0,
     )
     settings = DegradationSettings(
@@ -108,8 +115,14 @@ def series(ctx, traj, bau):
     }
 
 
+SERVICE_MIN = 0.0
+
+
 def main() -> None:
+    global SERVICE_MIN
     ev, session, signal, settings = build()
+    from evmenu_v2g.menu import service_minimum_soc
+    SERVICE_MIN = service_minimum_soc(ev=ev, session=session, reserve_soc=RESERVE)
     ctx1 = context(ev, session, signal, settings, V1G_ENVELOPE)
     ctx2 = context(ev, session, signal, settings, V2G)
     bau = bau_cost_for(
@@ -148,6 +161,9 @@ def main() -> None:
     n = ctx1.n
     out = {
         "meta": {
+            "tariff": "repo hourly_tariff.csv (hour_of_week), Wed arrival",
+            "service_minimum_pct": round(SERVICE_MIN * 100, 1),
+            "reserve_soc_pct_decl": RESERVE * 100,
             "ev": "60 kWh NMC, 7.2 kW onboard AC",
             "pack_age_years": 4.0,
             "accumulated_fec": 1200.0,

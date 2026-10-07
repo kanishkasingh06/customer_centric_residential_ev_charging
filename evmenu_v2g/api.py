@@ -12,7 +12,14 @@ from dataclasses import dataclass
 from evmenu.catalog import get_ev_model
 from evmenu.degradation import DegradationSettings
 from evmenu.exceptions import PhysicalConstraintError
+from evmenu.pricing import (
+    MINUTES_PER_WEEK,
+    WeeklyPriceProfile,
+    load_weekly_price_profile_csv,
+)
 from evmenu.schemas import ChargingSession, EVSpec, PlanningSignal
+
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 from .envelope import V1G_ENVELOPE, V2GEnvelope
 from .menu import (
@@ -66,8 +73,10 @@ def build_session_and_signal(
     consumption_kwh_per_km: float,
     buffer_soc: float,
     timestep_minutes: int,
-    price_per_kwh: list[float] | tuple[float, ...],
-    battery_temperature_c: float,
+    price_per_kwh: list[float] | tuple[float, ...] | None = None,
+    weekly_profile: WeeklyPriceProfile | None = None,
+    arrival_day: str = 'Wed',
+    battery_temperature_c: float = 25.0,
 ) -> tuple[ChargingSession, PlanningSignal]:
     """Build a single-session planning signal on a uniform grid.
 
@@ -76,12 +85,25 @@ def build_session_and_signal(
     overnight session that crosses midnight is covered.
     """
     per_day = (24 * 60) // timestep_minutes
-    if len(price_per_kwh) != per_day:
-        raise PhysicalConstraintError(
-            f"price_per_kwh must hold {per_day} values at {timestep_minutes}-minute resolution."
+    if weekly_profile is not None:
+        # Price by minute-of-week from the repo's own weekly profile, over a
+        # two-week grid so a session crossing midnight (or Sunday) is covered.
+        day = WEEKDAYS.index(arrival_day[:3].title())
+        steps = per_day * 14
+        prices = tuple(
+            weekly_profile.price_at((day * 1440 + i * timestep_minutes) % MINUTES_PER_WEEK)
+            for i in range(steps)
         )
-    prices = tuple(price_per_kwh) * 2
-    steps = len(prices)
+        offset_days = day
+    else:
+        if price_per_kwh is None or len(price_per_kwh) != per_day:
+            raise PhysicalConstraintError(
+                f"price_per_kwh must hold {per_day} values at "
+                f"{timestep_minutes}-minute resolution."
+            )
+        prices = tuple(price_per_kwh) * 2
+        steps = len(prices)
+        offset_days = 0
     hours = timestep_minutes / 60.0
     signal = PlanningSignal(
         timestep_hours=hours,
@@ -96,8 +118,9 @@ def build_session_and_signal(
     departure_minute = _parse_clock(departure_time)
     if departure_minute <= arrival_minute:
         departure_minute += 24 * 60
-    arrival_step = arrival_minute // timestep_minutes
-    departure_step = departure_minute // timestep_minutes
+    base = offset_days * per_day
+    arrival_step = base + arrival_minute // timestep_minutes
+    departure_step = base + departure_minute // timestep_minutes
     commute = next_trip_distance_km * consumption_kwh_per_km
     session = ChargingSession(
         arrival_step=arrival_step,
@@ -132,6 +155,9 @@ def generate_ev_menu_v2g(
     buffer_soc: float = 0.10,
     timestep_minutes: int = 30,
     price_profile: list[float] | None = None,
+    tariff_csv: str | None = None,
+    weekly_profile: WeeklyPriceProfile | None = None,
+    arrival_day: str = 'Wed',
     sell_to_buy_ratio: float = 0.80,
     battery_temperature_c: float = 25.0,
     battery_age_years: float = 3.0,
@@ -156,7 +182,13 @@ def generate_ev_menu_v2g(
     )
     if consumption_kwh_per_km is None:
         consumption_kwh_per_km = model.consumption_kwh_per_km
-    prices = price_profile or default_tou_profile(timestep_minutes)
+    if weekly_profile is None and tariff_csv is not None:
+        weekly_profile = load_weekly_price_profile_csv(
+            tariff_csv, profile_format='hour_of_week'
+        )
+    prices = None if weekly_profile is not None else (
+        price_profile or default_tou_profile(timestep_minutes)
+    )
     session, signal = build_session_and_signal(
         ev=ev,
         arrival_time=arrival_time,
@@ -167,6 +199,8 @@ def generate_ev_menu_v2g(
         buffer_soc=buffer_soc,
         timestep_minutes=timestep_minutes,
         price_per_kwh=prices,
+        weekly_profile=weekly_profile,
+        arrival_day=arrival_day,
         battery_temperature_c=battery_temperature_c,
     )
     if not 0.0 <= sell_to_buy_ratio <= 1.0:
