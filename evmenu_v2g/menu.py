@@ -20,11 +20,7 @@ from .envelope import V2GEnvelope
 from .trajectory import (
     RequestContext,
     Trajectory,
-    capacities,
-    evaluate,
-    interval_durations,
     solve,
-    warm_start,
 )
 
 #: Absolute floor on the realization band half-width, eq. (62).  Without it
@@ -233,7 +229,7 @@ def generate_offers(
             if cheapest is None:
                 continue
             maximum_saving = cheapest.saving
-            for level in saving_levels(maximum_saving, levels=levels):
+            for index, level in enumerate(saving_levels(maximum_saving, levels=levels)):
                 low = max(0.0, level - band_tolerance)
                 high = level + band_tolerance
                 found = solve(
@@ -253,9 +249,13 @@ def generate_offers(
                 )
                 offers.append(
                     V2GOffer(
+                        # The level INDEX, not its formatted value: two
+                        # levels closer than the 0.01 display precision
+                        # produced colliding ids, which every request with
+                        # a small S^max does.
                         offer_id=(
                             f"{ev.ev_id}-z{int(round(target * 100))}"
-                            f"-r{ready_step}-s{level:.2f}"
+                            f"-r{ready_step}-k{index}"
                         ),
                         ready_step=ready_step,
                         ready_minute=int(minute),
@@ -308,8 +308,26 @@ def pareto_filter(offers: list[V2GOffer]) -> list[V2GOffer]:
     return [a for a in offers if not any(dominates(b, a) for b in offers if b is not a)]
 
 
+def is_realizable(offer: V2GOffer) -> bool:
+    """Whether a single inverter could actually run this offer.
+
+    An offer left with simultaneous import and export is a relaxation
+    artefact: no residential charger imports and exports at once, and the
+    fade quoted against it counts throughput in both directions, so the
+    advertised number is not achievable by any real schedule.  Such an
+    offer stays in ``generated`` as a reported residue and is kept out of
+    the customer-facing menu.
+    """
+    return offer.simultaneous_periods == 0
+
+
 def compact(offers: list[V2GOffer], *, merge_tolerance: float = 5.0) -> list[V2GOffer]:
-    """Within each (ready, target) group, keep the lowest-fade offer per band."""
+    """Within each (ready, target) group, keep the lowest-fade offer per band.
+
+    A realizable offer beats an unrealizable one outright, whatever the
+    fade: picking the overlapping trajectory as a bucket's representative
+    discards a schedule that can be run in favour of one that cannot.
+    """
     buckets: dict[tuple[int, float, int], V2GOffer] = {}
     for offer in offers:
         key = (
@@ -318,7 +336,10 @@ def compact(offers: list[V2GOffer], *, merge_tolerance: float = 5.0) -> list[V2G
             int(offer.saving // merge_tolerance) if merge_tolerance > 0 else 0,
         )
         current = buckets.get(key)
-        if current is None or offer.capacity_fade < current.capacity_fade:
+        if current is None or (
+            (is_realizable(offer), -offer.capacity_fade)
+            > (is_realizable(current), -current.capacity_fade)
+        ):
             buckets[key] = offer
     return sorted(
         buckets.values(), key=lambda o: (o.target_soc, o.ready_step, -o.saving)

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from evmenu.catalog import get_ev_model
 from evmenu.degradation import DegradationSettings
 from evmenu.exceptions import PhysicalConstraintError
-
+from evmenu.schemas import EVSpec
 from evmenu_v2g import (
     THROUGHPUT_FRACTIONS_PER_FULL_CYCLE,
     V2GEnvelope,
@@ -16,8 +17,6 @@ from evmenu_v2g import (
     throughput_fraction,
 )
 from evmenu_v2g.api import build_session_and_signal, default_tou_profile
-from evmenu.catalog import get_ev_model
-from evmenu.schemas import EVSpec
 
 
 def _ev(model_id: str = "generic_60kwh_nmc") -> EVSpec:
@@ -201,3 +200,83 @@ def test_export_reduces_window_calendar_fade_somewhere(menu) -> None:
     exporting = [o for o in menu.generated if o.export_energy_kwh > 1e-6]
     assert exporting, "expected at least one offer to use export"
     assert all(o.soc_excursion >= 0.0 for o in exporting)
+
+
+def test_displayed_offers_are_realizable(menu) -> None:
+    """No simultaneous import/export in anything shown to a customer.
+
+    Proposition 3 does not make the relaxation exact under a saving band,
+    so a residue in ``generated`` is expected and is reported rather than
+    asserted away.  What must not happen is that residue reaching the
+    display: a single inverter cannot run it, and the fade quoted against
+    it counts throughput in both directions, so the advertised number is
+    unachievable by any real schedule.
+    """
+    assert all(o.simultaneous_periods == 0 for o in menu.displayed)
+    efficient_overlaps = menu.withheld_offer_count
+    assert efficient_overlaps >= 0
+    assert menu.generated_offer_count == len(menu.generated)
+
+
+def test_offer_ids_are_unique(menu) -> None:
+    """Formatting the level value collided whenever S^max was small."""
+    ids = [o.offer_id for o in menu.generated]
+    duplicates = {i for i in ids if ids.count(i) > 1}
+    assert not duplicates, f"duplicate offer ids: {sorted(duplicates)}"
+
+
+def test_export_window_crossing_midnight_is_honoured() -> None:
+    """A 22:00-02:00 window must permit export on both sides of midnight.
+
+    Written by continuing past 1440, not by wrapping the numbers round.
+    Comparing a wrapped clock minute against a non-wrapping window
+    silently dropped the post-midnight half -- the same failure class as
+    the per-day allowance this envelope deliberately avoids, and for an
+    overnight residential session it is the normal case.
+    """
+    envelope = V2GEnvelope(discharge_power_kw=7.2, export_window=(1320, 1560))
+    assert envelope.permits_minute(1320)        # 22:00
+    assert envelope.permits_minute(1430)        # 23:50
+    assert envelope.permits_minute(0)           # 00:00, the far side
+    assert envelope.permits_minute(90)          # 01:30
+    assert not envelope.permits_minute(120)     # 02:00, the exclusive edge
+    assert not envelope.permits_minute(1200)    # 20:00, before the window
+
+
+def test_export_window_capacities_span_midnight() -> None:
+    """The same thing where it bites: the per-interval export caps."""
+    from evmenu_v2g.api import build_session_and_signal, default_tou_profile
+    from evmenu_v2g.trajectory import RequestContext, capacities
+
+    ev = _ev()
+    session, signal = build_session_and_signal(
+        ev=ev, arrival_time="19:30", departure_time="08:00", current_soc=0.35,
+        next_trip_distance_km=40.0, consumption_kwh_per_km=0.17, buffer_soc=0.10,
+        timestep_minutes=30, price_per_kwh=default_tou_profile(30),
+    )
+    envelope = V2GEnvelope(
+        discharge_power_kw=7.2, export_window=(1320, 1560),
+        allow_export_after_ready=True,
+    )
+    ctx = RequestContext(
+        ev=ev, session=session, signal=signal, envelope=envelope,
+        settings=DegradationSettings(), ready_step=session.departure_step,
+        target_soc=0.8,
+        sell_price=(0.0,) * (session.departure_step - session.arrival_step),
+        discharge_severity=1.0,
+    )
+    _, cap_out = capacities(ctx)
+    open_minutes = {
+        signal.interval_start_minutes[session.arrival_step + i] % 1440
+        for i, cap in enumerate(cap_out) if cap > 0.0
+    }
+    assert 1320 in open_minutes and 1410 in open_minutes   # before midnight
+    assert 0 in open_minutes and 90 in open_minutes        # after midnight
+    assert 120 not in open_minutes and 1200 not in open_minutes
+
+
+def test_ambiguous_wrapped_export_window_is_rejected() -> None:
+    """(1320, 120) could mean 22:00-02:00 or nothing; refuse to guess."""
+    for bad in ((1320, 120), (0, 2000), (1500, 1600)):
+        with pytest.raises(PhysicalConstraintError):
+            V2GEnvelope(discharge_power_kw=7.2, export_window=bad)

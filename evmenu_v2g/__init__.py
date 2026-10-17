@@ -34,6 +34,7 @@ from .menu import (
     compact,
     dominates,
     generate_offers,
+    is_realizable,
     pareto_filter,
     saving_levels,
     service_minimum_soc,
@@ -44,7 +45,9 @@ from .trajectory import (
     battery_states,
     capacities,
     evaluate,
+    require_feasible,
     solve,
+    solve_cost_linear,
     warm_start,
 )
 
@@ -75,12 +78,15 @@ __all__ = [
     "format_menu",
     "generate_ev_menu_v2g",
     "generate_offers",
+    "is_realizable",
     "pareto_filter",
     "peak_c_rate",
+    "require_feasible",
     "saving_levels",
     "service_minimum_soc",
     "soc_excursion",
     "solve",
+    "solve_cost_linear",
     "throughput_fraction",
     "warm_start",
 ]

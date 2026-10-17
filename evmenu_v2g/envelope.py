@@ -52,6 +52,18 @@ class V2GEnvelope:
         Optional ``(start_minute, end_minute)`` clock window, inclusive of
         start and exclusive of end, within which export is permitted.
         ``None`` permits export throughout the connected session.
+
+        The window MAY cross midnight, and for a residential overnight
+        session it usually does.  Write it by continuing past 1440 rather
+        than wrapping the numbers round: 22:00-02:00 is ``(1320, 1560)``,
+        not ``(1320, 120)``.  ``end`` may therefore run up to
+        ``start + 1440``; a window wider than a day is rejected, since it
+        would permit export at every clock minute and should be written
+        as ``None``.  Membership is tested against both the clock minute
+        and that minute plus a day, so the post-midnight half of a
+        crossing window is honoured rather than silently dropped -- the
+        same failure class as the per-day allowance this envelope
+        deliberately avoids.
     allow_export_after_ready:
         Whether export may continue once the advertised ready-by time has
         passed.  Default ``False``.  The availability constraint alone only
@@ -105,9 +117,16 @@ class V2GEnvelope:
                 if isinstance(value, bool) or not isinstance(value, int):
                     raise SchemaValidationError(f"export_window {label} must be an integer.")
             del value_end
-            if not 0 <= start < end:
+            if not 0 <= start < 1440:
                 raise PhysicalConstraintError(
-                    "export_window must satisfy 0 <= start < end."
+                    "export_window start must be a clock minute in [0, 1440)."
+                )
+            if not start < end <= start + 1440:
+                raise PhysicalConstraintError(
+                    "export_window must satisfy start < end <= start + 1440; "
+                    "write a window crossing midnight by continuing past 1440 "
+                    "(22:00-02:00 is (1320, 1560)), and use None for a window "
+                    "that covers the whole day."
                 )
 
     @property
@@ -117,6 +136,19 @@ class V2GEnvelope:
             self.session_export_allowance_kwh is None
             or self.session_export_allowance_kwh > 0.0
         )
+
+    def permits_minute(self, minute: int) -> bool:
+        """Return whether export is permitted at this clock minute.
+
+        ``minute`` is a minute of the day.  A window that crosses midnight
+        is written with ``end > 1440``, so the post-midnight half is found
+        by testing ``minute + 1440`` as well as ``minute`` itself.
+        """
+        if self.export_window is None:
+            return True
+        start, end = self.export_window
+        clock = minute % 1440
+        return (start <= clock < end) or (start <= clock + 1440 < end)
 
     def resolved_departure_floor(self, arrival_soc: float) -> float:
         """Return ``zeta_i``, defaulting to full arrival-energy protection."""

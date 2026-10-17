@@ -24,12 +24,11 @@ WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 from .envelope import V1G_ENVELOPE, V2GEnvelope
 from .menu import (
     V2GOffer,
-    bau_cost_for,
     compact,
     generate_offers,
+    is_realizable,
     pareto_filter,
 )
-from .trajectory import RequestContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +48,8 @@ class V2GMenu:
     displayed: tuple[V2GOffer, ...]
     simultaneous_offer_count: int
     export_offer_count: int
+    generated_offer_count: int = 0
+    withheld_offer_count: int = 0
 
     @property
     def export_share(self) -> float:
@@ -232,7 +233,14 @@ def generate_ev_menu_v2g(
         maximum_ready_steps=maximum_ready_steps,
     )
     compacted = compact(offers)
-    displayed = pareto_filter(compacted)
+    efficient = pareto_filter(compacted)
+    # An offer that still imports and exports in the same interval cannot be
+    # run by a single inverter and its quoted fade counts both directions, so
+    # it is not a thing to put in front of a customer.  It stays in
+    # `generated` as the reported Prop 3 residue; `withheld_offer_count` says
+    # how many reached the display stage and were held back.
+    displayed = [offer for offer in efficient if is_realizable(offer)]
+    withheld = len(efficient) - len(displayed)
     displayed = sorted(displayed, key=lambda o: (o.target_soc, o.ready_step, -o.saving))
     return V2GMenu(
         ev_id=ev.ev_id,
@@ -248,6 +256,8 @@ def generate_ev_menu_v2g(
         displayed=tuple(displayed),
         simultaneous_offer_count=sum(1 for o in offers if o.simultaneous_periods > 0),
         export_offer_count=sum(1 for o in displayed if o.uses_export),
+        generated_offer_count=len(offers),
+        withheld_offer_count=withheld,
     )
 
 
@@ -281,7 +291,9 @@ def format_menu(menu: V2GMenu) -> str:
         )
     if menu.simultaneous_offer_count:
         lines.append(
-            f"  ! {menu.simultaneous_offer_count} offer(s) used simultaneous"
-            f" import/export -- binaries needed (eq. 63)"
+            f"  ! {menu.simultaneous_offer_count} of {menu.generated_offer_count}"
+            f" generated offer(s) used simultaneous import/export"
+            f" -- binaries needed (eq. 63);"
+            f" {menu.withheld_offer_count} withheld from the display"
         )
     return "\n".join(lines)

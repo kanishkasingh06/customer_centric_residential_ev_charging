@@ -24,12 +24,12 @@ from dataclasses import dataclass
 
 from evmenu.degradation import (
     _HOURS_PER_YEAR,
+    DegradationSettings,
     _relative_age_factor,
     _temperature_factor,
     calendar_soc_stress,
     cycle_age_slope,
 )
-from evmenu.degradation import DegradationSettings
 from evmenu.schemas import ChargingSession, EVSpec, PlanningSignal
 
 #: One equivalent full cycle is 2 * B_max of battery-side throughput, so a

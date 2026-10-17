@@ -14,7 +14,6 @@ from evmenu.menu import MenuCandidate
 from evmenu.profiles import build_immediate_charging_profile
 from evmenu.schemas import ChargingSession, EVSpec, MenuSettings, PlanningSignal
 from evmenu.validation import ValidationReport
-
 from evmenu_v2g import V1G_ENVELOPE, V2GEnvelope, assess_trajectory, generate_ev_menu_v2g
 from evmenu_v2g.fade import soc_excursion, throughput_fraction
 
@@ -144,3 +143,95 @@ def test_zero_allowance_envelope_matches_v1g_menu() -> None:
     for left, right in zip(a.displayed, b.displayed, strict=True):
         assert left.saving == pytest.approx(right.saving, rel=0.0, abs=1e-9)
         assert left.capacity_fade == pytest.approx(right.capacity_fade, rel=0.0, abs=1e-12)
+
+
+def test_cost_solve_matches_evmenu_minimum_cost_exactly() -> None:
+    """The end-to-end E_out == 0 agreement test Block 9 asks for.
+
+    ``test_unidirectional_fade_matches_evmenu_exactly`` compares the fade
+    FUNCTION on a profile evmenu built, which is tight but cannot see a
+    solver that returns the wrong trajectory.  This compares the solver:
+    with export disabled the feasible set is exactly evmenu's, so the
+    cost-minimising solve must reproduce ``build_minimum_cost_charging_
+    profile`` -- which is exact by construction, since a constant charger
+    limit makes cheapest-first filling optimal.
+
+    Two defects lived in the gap between those two tests.  SLSQP stopped
+    at ``ftol`` short of the vertex, and ``solve`` discarded points whose
+    ``result.success`` was False even though they were feasible and
+    optimal, collapsing whole saving ladders to zero.  Worst error across
+    this grid was 76.8 currency units before the LP route; assert it in
+    the noise.
+    """
+    from evmenu.exceptions import PhysicalConstraintError
+    from evmenu.profiles import build_minimum_cost_charging_profile
+    from evmenu_v2g.menu import bau_cost_for
+    from evmenu_v2g.trajectory import RequestContext, solve
+
+    ev, session, signal = _fixture()
+    # reserve matched to the pack's own minimum so the envelope adds nothing
+    envelope = V2GEnvelope(discharge_power_kw=0.0, reserve_soc=0.05)
+    n = session.departure_step - session.arrival_step
+    compared = 0
+    for target in (0.5, 0.6, 0.8, 0.9, 1.0):
+        for ready in range(session.arrival_step + 4, session.departure_step + 1, 3):
+            try:
+                reference = build_minimum_cost_charging_profile(
+                    ev=ev, session=session, signal=signal,
+                    target_soc=target, ready_step=ready,
+                )
+            except PhysicalConstraintError:
+                continue  # evmenu cannot serve it either
+            ctx = RequestContext(
+                ev=ev, session=session, signal=signal, envelope=envelope,
+                settings=DegradationSettings(), ready_step=ready,
+                target_soc=target, sell_price=(0.0,) * n, discharge_severity=1.0,
+            )
+            bau = bau_cost_for(
+                ev=ev, session=session, signal=signal,
+                terminal_energy_kwh=ctx.terminal_energy_kwh,
+            )
+            got = solve(ctx, objective="cost", bau_cost=bau, restarts=1)
+            assert got is not None, f"no solution for target={target} ready={ready}"
+            assert got.cost == pytest.approx(
+                reference.charging_cost, rel=0.0, abs=1e-6
+            ), f"target={target} ready={ready}"
+            compared += 1
+    assert compared >= 15, f"only {compared} requests compared -- grid went stale"
+
+
+def test_low_arrival_soc_is_still_served() -> None:
+    """A car arriving below the declared reserve must still get a menu.
+
+    Eq. (36) says export may never drive the pack below the reserve.
+    Imposing that as a state constraint at every boundary instead said
+    the pack is above it throughout, so a car arriving beneath it had no
+    feasible trajectory and every request was dropped -- an empty menu,
+    silently, for the customer who most needs to charge.  evmenu serves
+    this case, so the V1G envelope must too.
+    """
+    for arrival in (0.08, 0.10, 0.15):
+        menu = generate_ev_menu_v2g(
+            envelope=V1G_ENVELOPE, current_soc=arrival,
+            levels=2, maximum_ready_steps=2,
+        )
+        assert menu.generated, f"empty menu at arrival SOC {arrival}"
+        assert menu.displayed, f"nothing displayable at arrival SOC {arrival}"
+
+
+def test_export_never_takes_a_low_pack_below_its_arrival_energy() -> None:
+    """Relaxing the floor must not license discharging the pack further."""
+    envelope = V2GEnvelope(
+        discharge_power_kw=7.2, discharge_efficiency=0.93, reserve_soc=0.25,
+        session_export_allowance_kwh=15.0,
+    )
+    arrival_soc = 0.10
+    menu = generate_ev_menu_v2g(
+        envelope=envelope, current_soc=arrival_soc, levels=2, maximum_ready_steps=2,
+    )
+    assert menu.generated
+    arrival_energy = arrival_soc * 60.0
+    for offer in menu.generated:
+        assert min(offer.trajectory.battery_energy_kwh) >= arrival_energy - 1e-6, (
+            offer.offer_id
+        )
