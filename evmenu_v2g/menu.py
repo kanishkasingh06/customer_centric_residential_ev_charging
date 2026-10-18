@@ -57,6 +57,40 @@ class V2GOffer:
     def uses_export(self) -> bool:
         return self.export_energy_kwh > 1e-9
 
+    @property
+    def delivered_soc(self) -> float:
+        """Terminal state of charge actually delivered.
+
+        ``target_soc`` is the REQUESTED tier.  Terminal energy is pinned
+        to ``max(zeta, z) B_max``, so whenever the declared departure
+        floor exceeds the tier -- which it does for every tier below the
+        arrival SOC -- the request understates what the car leaves with.
+        Two offers labelled 39% and 65% can deliver identical terminal
+        SOC, and a consumer scoring the label reads a difference that is
+        not there.  A choice model weighting ``b_soc * target`` is
+        exactly such a consumer, so it must read this instead.
+
+        A property rather than a field: it cannot be left unset, and it
+        cannot drift from the trajectory it describes.
+        """
+        states = self.trajectory.battery_energy_kwh
+        if not states:
+            return self.target_soc
+        capacity = max(states[0], max(states))
+        if capacity <= 0.0:
+            return self.target_soc
+        return states[-1] / self._battery_capacity_kwh
+
+    @property
+    def _battery_capacity_kwh(self) -> float:
+        """Pack capacity, recovered from the trajectory's own SOC series."""
+        states = self.trajectory.battery_energy_kwh
+        socs = self.trajectory.soc
+        for energy, soc in zip(states, socs, strict=False):
+            if soc > 1e-9:
+                return energy / soc
+        return 1.0
+
 
 def bau_cost_for(
     *,
