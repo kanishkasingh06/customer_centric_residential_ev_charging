@@ -36,7 +36,44 @@ from math import sqrt
 # research/ is this file's own directory, so the Phase 11 choice model
 # imports directly.  Reuse it rather than restate the conversion: the
 # pack costs are sourced and the +/-25% sensitivity band lives there.
-from choice import PACK_COST_RS_PER_KWH, wear_cost_rs
+from choice_v2g import END_OF_LIFE_CAPACITY_LOSS
+
+# ---------------------------------------------------------------------------
+# money basis: one currency, no FX step
+# ---------------------------------------------------------------------------
+#
+# Earlier versions compared savings from a rupee tariff against a pack
+# cost quoted in USD and converted at market exchange.  That ignores
+# purchasing power parity, and the two sides of the comparison sit on
+# opposite sides of it: a battery pack is a globally traded good, so
+# market FX is right for it, while a residential electricity tariff is
+# non-traded and domestic, so it is not.  Converting the pack at market
+# FX against India's PPP factor of roughly a quarter of it inflated the
+# battery side about fourfold, and made most of the menu look
+# net-negative when it is not.
+#
+# Everything is therefore in USD.  The tariff SHAPE is untouched -- the
+# duck curve and its 4.0x peak-to-trough ratio are what the optimiser
+# responds to -- and only the level is set, to a plausible residential
+# mean.  Savings scale linearly with this, so it is a reported
+# assumption, not a hidden one.
+TARIFF_MEAN_USD_PER_KWH = 0.16          # US residential order of magnitude
+_RUPEE_TARIFF_MEAN = 5.117              # mean of default_tou_profile(30)
+TARIFF_SCALE = TARIFF_MEAN_USD_PER_KWH / _RUPEE_TARIFF_MEAN
+
+#: Pack cost, USD per kWh.  The RESIDUAL-VALUE basis, not a new-pack
+#: price.  What an owner loses to marginal fade is the value of used
+#: capacity, which Hein et al. (2012) model endogenously at roughly
+#: EUR 18/kWh; a new-pack price is an upper bound by construction, and
+#: one that technology makes worse over time, since the replacement a
+#: customer eventually buys costs what packs cost THEN, not now.
+#: Sweep against the alternatives below before quoting any figure.
+PACK_COST_USD_PER_KWH = 20.0
+PACK_COST_ALTERNATIVES = {
+    "residual (Hein 2012)": 20.0,
+    "BNEF BEV pack average": 99.0,
+    "BNEF NMC new pack": 128.0,
+}
 
 from evmenu.catalog import EVModel
 from evmenu.degradation import (
@@ -111,6 +148,17 @@ AMENITY_DEADLINE_MINUTE = 6 * 60          # 06:00
 AMENITY_DECAY_HOURS = 3.0
 
 
+def saving_usd(offer: V2GOffer) -> float:
+    """The offer's saving in USD.
+
+    The menu is generated against the rupee-denominated tariff, so its
+    savings carry that unit.  Scaling here rather than regenerating
+    keeps the SHAPE of the tariff -- which is what the optimiser
+    actually responds to -- identical to every earlier run.
+    """
+    return offer.saving * TARIFF_SCALE
+
+
 def wear_rs(offer: V2GOffer) -> float:
     """Rupees of pack this session consumes, via the Phase 11 mapping.
 
@@ -121,8 +169,11 @@ def wear_rs(offer: V2GOffer) -> float:
     choice model weigh a rupee of pack against a rupee of electricity,
     and it is the only form of "health" a customer can act on.
     """
-    return wear_cost_rs(
-        offer.capacity_fade, KIA.usable_battery_kwh, KIA.chemistry
+    return (
+        offer.capacity_fade
+        / END_OF_LIFE_CAPACITY_LOSS
+        * KIA.usable_battery_kwh
+        * PACK_COST_USD_PER_KWH
     )
 
 
@@ -135,10 +186,11 @@ def marginal_wear_rs(offer: V2GOffer, baseline_fade: float) -> float:
     decline-to-charge option -- which makes this "what you pay in
     battery, over and above doing nothing".
     """
-    return wear_cost_rs(
-        max(0.0, offer.capacity_fade - baseline_fade),
-        KIA.usable_battery_kwh,
-        KIA.chemistry,
+    return (
+        max(0.0, offer.capacity_fade - baseline_fade)
+        / END_OF_LIFE_CAPACITY_LOSS
+        * KIA.usable_battery_kwh
+        * PACK_COST_USD_PER_KWH
     )
 
 
@@ -146,7 +198,7 @@ def _attributes(offer: V2GOffer) -> tuple[float, float, float, float]:
     return (
         float(offer.ready_minute),
         float(offer.target_soc),
-        float(offer.saving),
+        saving_usd(offer),
         float(offer.capacity_fade),
     )
 
@@ -186,7 +238,7 @@ def orientation_scores(
                a second target-SOC axis.
     """
     fades = [o.capacity_fade for o in offers]
-    savings = [o.saving for o in offers]
+    savings = [saving_usd(o) for o in offers]
     targets = [o.target_soc for o in offers]
 
     def unit(value: float, column: Sequence[float]) -> float:
@@ -212,7 +264,7 @@ def orientation_scores(
     scores = {}
     for offer in offers:
         health = 1.0 - unit(offer.capacity_fade, fades)
-        saving = unit(offer.saving, savings)
+        saving = unit(saving_usd(offer), savings)
         amenity = unit(raw_amenity[offer.offer_id], amenity_column)
         scores[offer.offer_id] = (health, amenity, saving)
     return scores
@@ -242,7 +294,7 @@ def intent_anchors(
     floor = min(o.capacity_fade for o in offers) if baseline_fade is None else baseline_fade
 
     def net(offer: V2GOffer) -> float:
-        return offer.saving - marginal_wear_rs(offer, floor)
+        return saving_usd(offer) - marginal_wear_rs(offer, floor)
 
     # An offer that destroys value should never REPRESENT an intent, even
     # if it is the extreme point on that axis.  Without this the amenity
@@ -347,26 +399,29 @@ def render(chosen: Sequence[tuple[V2GOffer, str]], universe: Sequence[V2GOffer])
         health, amenity, saving = scores[offer.offer_id]
         mode = "V2G" if offer.export_energy_kwh > 1e-6 else "V1G"
         wear = marginal_wear_rs(offer, baseline)
-        print(f"{hour:02d}:{minute:02d}   {offer.target_soc:6.0%} {offer.saving:8.2f} "
-              f"{wear:8.2f} {offer.saving - wear:8.2f} "
+        print(f"{hour:02d}:{minute:02d}   {offer.delivered_soc:6.0%} "
+              f"{saving_usd(offer):8.2f} "
+              f"{wear:8.2f} {saving_usd(offer) - wear:8.2f} "
               f"{offer.import_energy_kwh:7.2f} {offer.export_energy_kwh:7.2f}  {mode:<4} "
               f"{orientation_label((health, amenity, saving)):<9} "
               f"{health:.2f}/{amenity:.2f}/{saving:.2f}"
-              f"{'   <- costs more pack than it returns' if offer.saving - wear < 0 else ''}")
+              f"{'   <- costs more pack than it returns' if saving_usd(offer) - wear < 0 else ''}")
     counts: dict[str, int] = {}
     for offer, _ in chosen:
         counts[orientation_label(scores[offer.offer_id])] = counts.get(
             orientation_label(scores[offer.offer_id]), 0) + 1
     print("\n  orientation mix: " + ", ".join(
         f"{k} {v}" for k, v in sorted(counts.items())))
-    negative = sum(1 for o, _ in chosen if o.saving - marginal_wear_rs(o, baseline) < 0)
+    negative = sum(
+        1 for o, _ in chosen if saving_usd(o) - marginal_wear_rs(o, baseline) < 0
+    )
     print(f"  modes: V1G {len(chosen) - v2g}, V2G {v2g};"
           f" {negative} offer(s) net-negative")
     print(f"  minimum pairwise separation: {minimum_separation(chosen, spans):.4f}")
     print(f"  battery = marginal pack spend vs the least-fade row "
-          f"({wear_rs(min(universe, key=lambda o: o.capacity_fade)):.2f} Rs absolute), "
-          f"at {PACK_COST_RS_PER_KWH[KIA.chemistry]:,.0f} Rs/kWh "
-          f"({KIA.chemistry}, BNEF 2025); net = saving - battery")
+          f"(${wear_rs(min(universe, key=lambda o: o.capacity_fade)):.2f} absolute), "
+          f"at ${PACK_COST_USD_PER_KWH:,.0f}/kWh residual basis "
+          f"({KIA.chemistry}); net = saving - battery, all USD")
 
 
 def main() -> None:
