@@ -61,6 +61,7 @@ TARIFF_MEAN_USD_PER_KWH = 0.16          # US residential order of magnitude
 _RUPEE_TARIFF_MEAN = 5.117              # mean of default_tou_profile(30)
 TARIFF_SCALE = TARIFF_MEAN_USD_PER_KWH / _RUPEE_TARIFF_MEAN
 
+
 #: The saving machinery carries ABSOLUTE currency tolerances: offers are
 #: banded to within `band_tolerance` of a saving level, and compacted by
 #: merging any two within `merge_tolerance`.  Scaling the tariff without
@@ -70,43 +71,72 @@ TARIFF_SCALE = TARIFF_MEAN_USD_PER_KWH / _RUPEE_TARIFF_MEAN
 #: gave 38 displayed offers where the rupee run gave 149.  Both are
 #: therefore scaled by the same factor, so the discretisation stays
 #: proportional to the spread it is discretising.
-BAND_TOLERANCE_USD = 0.5 * TARIFF_SCALE
-MERGE_TOLERANCE_USD = 5.0 * TARIFF_SCALE
 
-#: Peak-to-trough ratio of the tariff.  The illustrative profile this
-#: work inherited spans 4.0x, which is wide for a residential tariff and
-#: flatters V2G: the spread IS the arbitrage opportunity, so every
-#: export offer's value scales with it.  A standard domestic ToU is
-#: nearer 2x (UK Economy 7, most US residential ToU); a dedicated EV
-#: tariff is wider, around 3-4x (Octopus Go and similar).  An EV owner
-#: is plausibly on the latter, so 3.0 is the default, but it is an
-#: assumption and the sweep below is the honest way to report it.
+#: Tariff endpoints, USD per kWh.  Set directly rather than as a ratio
+#: about a mean: a tariff is published as a cheapest rate and a dearest
+#: one, and those are the numbers a customer faces.  The duck-curve
+#: SHAPE is inherited unchanged -- which hour is dear and which is cheap
+#: is untouched -- and only the endpoints are mapped.
 #:
-#: Measured on the worked Kia menu, mean held fixed:
-#:     ratio   V2G offers   best net   wear as % of saving
-#:      4.0      11 of 15     $4.06            11%
-#:      3.0      10 of 15     $2.99            14%
-#:      2.5       9 of 15     $2.28            16%
-#:      2.0       8 of 15     $1.51            20%
-#:      1.6       0 of 15     $0.84            29%
-#: Below about 1.6x no offer exports at all: the spread no longer covers
-#: the round-trip loss and the fade the export costs.
-TARIFF_PEAK_TROUGH_RATIO = 3.0
+#: The spread is the arbitrage opportunity, so V2G value scales with it.
+#: Measured on the worked menu at the 20 USD/kWh residual pack basis,
+#: mean held fixed while only the spread moved:
+#:     spread   V2G offers   best net   wear as % of saving
+#:      4.0x      11 of 15     $4.06            11%
+#:      3.0x      10 of 15     $2.99            14%
+#:      2.0x       8 of 15     $1.51            20%
+#:      1.6x       0 of 15     $0.84            29%
+#: Below about 1.6x nothing exports at all: the spread stops covering
+#: the round-trip loss plus the fade the export costs.
+#:
+#: These endpoints give a 5.0x spread on a 0.144 USD/kWh mean.
+#: Converter efficiencies, each direction.  These and the tariff spread
+#: are not independent: export pays only where the within-session price
+#: ratio exceeds
+#:
+#:     (1 / (eta_in * eta_out)) / sell_to_buy_ratio
+#:
+#: so efficiency and the export tariff trade off directly against the
+#: spread.  At 0.90/0.93 and a sell ratio of 0.80 that threshold is
+#: 1.493x; at 0.95/0.95 it is 1.385x.  Efficiency alone cannot rescue a
+#: narrow tariff -- a 1.29x session would need a round-trip above 0.970,
+#: about 0.985 each way, which no real charger reaches.  The sell ratio
+#: is the stronger lever and is still an unexamined inherited
+#: assumption.
+CHARGE_EFFICIENCY = 0.95
+DISCHARGE_EFFICIENCY = 0.95
+
+TARIFF_MIN_USD_PER_KWH = 0.12
+TARIFF_MAX_USD_PER_KWH = 0.30
 
 
-def _tariff_usd(ratio: float = TARIFF_PEAK_TROUGH_RATIO) -> tuple[float, ...]:
-    """The inherited duck-curve shape, compressed to `ratio` and scaled.
+def _tariff_usd(
+    low: float = TARIFF_MIN_USD_PER_KWH,
+    high: float = TARIFF_MAX_USD_PER_KWH,
+) -> tuple[float, ...]:
+    """The inherited duck-curve shape mapped affinely onto [low, high].
 
-    Compression is affine about the mean, so the SHAPE -- which hour is
-    dear and which is cheap -- is untouched; only the amplitude moves.
-    Holding the mean fixed keeps the level comparable across ratios, so
-    a change in savings is attributable to the spread alone.
+    Affine in the price, so every hour's position relative to the others
+    is preserved exactly and only the endpoints move.
     """
-    base = [float(p) for p in default_tou_profile(30)]
-    mean = sum(base) / len(base)
-    above, below = max(base) - mean, mean - min(base)
-    alpha = mean * (ratio - 1.0) / (above + ratio * below)
-    return tuple((mean + alpha * (p - mean)) * TARIFF_SCALE for p in base)
+    if not 0.0 < low < high:
+        raise ValueError("tariff endpoints must satisfy 0 < low < high")
+    base = [float(x) for x in default_tou_profile(30)]
+    bottom, top = min(base), max(base)
+    return tuple(low + (x - bottom) / (top - bottom) * (high - low) for x in base)
+
+
+#: Band and merge tolerances are ABSOLUTE currency amounts, so they must
+#: track the tariff LEVEL the endpoints set.  Left at a value sized for
+#: a different currency or level they change the menu rather than
+#: relabelling it: rupee-sized tolerances against dollar savings merged
+#: offers a rupee run kept apart, giving 38 displayed offers where the
+#: rupee run gave 149.
+_TOLERANCE_SCALE = (
+    (TARIFF_MIN_USD_PER_KWH + TARIFF_MAX_USD_PER_KWH) / 2.0
+) / _RUPEE_TARIFF_MEAN
+BAND_TOLERANCE_USD = 0.5 * _TOLERANCE_SCALE
+MERGE_TOLERANCE_USD = 5.0 * _TOLERANCE_SCALE
 
 #: Pack cost, USD per kWh.  The RESIDUAL-VALUE basis, not a new-pack
 #: price.  What an owner loses to marginal fade is the value of used
@@ -145,7 +175,10 @@ KIA = EVModel(
     usable_battery_kwh=78.0,
     minimum_soc=0.05,
     onboard_ac_power_kw=7.2,
-    charging_efficiency=0.90,
+    # 0.95 each way, a modern bidirectional charger rather than the
+    # conservative 0.90/0.93 AC onboard figures inherited from the V1G
+    # work.  Round-trip rises from 0.837 to 0.9025.
+    charging_efficiency=CHARGE_EFFICIENCY,
     chemistry="NMC",
     consumption_kwh_per_km=0.18,
     assumption_note="EV6/EV3 long-range class; verify usable capacity before deployment.",
@@ -424,7 +457,7 @@ def pooled_candidates() -> list[V2GOffer]:
     for mode, envelope in (
         ("V1G", V2GEnvelope(discharge_power_kw=0.0, reserve_soc=RESERVE_SOC)),
         ("V2G", V2GEnvelope(
-            discharge_power_kw=7.2, discharge_efficiency=0.93,
+            discharge_power_kw=7.2, discharge_efficiency=DISCHARGE_EFFICIENCY,
             reserve_soc=RESERVE_SOC, session_export_allowance_kwh=15.0)),
     ):
         menu = generate_ev_menu_v2g(**SESSION, envelope=envelope)
