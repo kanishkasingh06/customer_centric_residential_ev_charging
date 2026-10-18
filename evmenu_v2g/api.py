@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from evmenu.catalog import get_ev_model
-from evmenu.degradation import DegradationSettings
+from evmenu.degradation import ChemistryDegradationParameters, DegradationSettings
 from evmenu.exceptions import PhysicalConstraintError
 from evmenu.pricing import (
     MINUTES_PER_WEEK,
@@ -172,6 +172,8 @@ def generate_ev_menu_v2g(
     maximum_ready_steps: int = 4,
     target_tiers: tuple[float, ...] | None = (0.8, 1.0),
     target_tier_count: int | None = None,
+    lfp_parameters: ChemistryDegradationParameters | None = None,
+    nmc_parameters: ChemistryDegradationParameters | None = None,
 ) -> V2GMenu:
     """Generate a V2G customer menu for one EV and one connected session."""
     model = get_ev_model(ev_model)
@@ -215,10 +217,15 @@ def generate_ev_menu_v2g(
     sell_price = tuple(
         signal.price_per_kwh[session.arrival_step + i] * sell_to_buy_ratio for i in range(n)
     )
+    # Published parameter sets are opt-in, so they have to be reachable
+    # from here; otherwise they are scaffolding nothing can call.
+    defaults = DegradationSettings()
     settings = DegradationSettings(
         battery_age_years=battery_age_years,
         cumulative_equivalent_full_cycles=accumulated_equivalent_full_cycles,
         fallback_temperature_c=battery_temperature_c,
+        lfp=defaults.lfp if lfp_parameters is None else lfp_parameters,
+        nmc=defaults.nmc if nmc_parameters is None else nmc_parameters,
     )
     offers = generate_offers(
         ev=ev,

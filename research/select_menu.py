@@ -39,6 +39,10 @@ from math import sqrt
 from choice import PACK_COST_RS_PER_KWH, wear_cost_rs
 
 from evmenu.catalog import EVModel
+from evmenu.degradation import (
+    NAUMANN_LFP_2018_PARAMETERS,
+    SCHMALSTIEG_NMC_2014_PARAMETERS,
+)
 from evmenu_v2g import V2GEnvelope, generate_ev_menu_v2g
 from evmenu_v2g.menu import V2GOffer, compact, pareto_filter
 
@@ -83,6 +87,11 @@ SESSION = {
     # nothing between arrival and 0.8, so the health end of its menu is a
     # single "decline" row.
     "target_tier_count": 6,
+    # The published parameter sets, not the shipped literature-anchor
+    # surrogates.  Naumann et al. (2018) for LFP, Schmalstieg et al.
+    # (2014) for NMC.  Set both to None to reproduce the older numbers.
+    "lfp_parameters": NAUMANN_LFP_2018_PARAMETERS,
+    "nmc_parameters": SCHMALSTIEG_NMC_2014_PARAMETERS,
 }
 
 
