@@ -78,6 +78,17 @@ centre. They are not interchangeable, and which one is used decides
 whether discharging a pack at moderate state of charge carries any
 calendar benefit.
 
+A parameter set may instead be fitted on cell \emph{voltage}, in which
+case
+%
+\begin{equation}
+g(s) \;=\; \kappa\,\bigl(\mu\, V(s) + \nu\bigr),
+\label{eq:gvolt}
+\end{equation}
+%
+with $V(s)$ read off a tabulated OCV curve. The two forms are
+alternatives, not components: a parameter set declares one or the other.
+
 \paragraph{LFP.} The coefficients are those of Naumann et al.\
 (2018)~\cite{naumann2018}, converted to the differential form of
 Section~\ref{sec:parameters}. That study reports a cubic,
@@ -88,6 +99,22 @@ $s^{\mathrm{knee}} = 0.70$ with $a_1 = 0$, which is flat below
 \SI{70}{\percent} and gives a full-to-empty spread of only
 \num{1.24}; it is not what the cited study measured and has been
 replaced.
+
+\paragraph{NMC.} Schmalstieg et al.~\cite{schmalstieg2014} fit calendar
+ageing linearly on cell voltage, so \eqref{eq:gvolt} applies with
+$\mu = \num{7.543}$, $\nu = \num{-23.75}$ and $V(s)$ from their Fig.~1,
+digitised at \SI{1}{\percent} intervals. Their Eq.~(14) is cumulative in
+days; converting to the per-year incremental form used here gives
+%
+\begin{equation}
+\kappa \;=\; 0.75 \cdot 365^{0.75} \cdot 10^{6} \cdot
+  \exp\!\left(-6976 / T^{\mathrm{ref}}\right) \;=\; \num{0.0043184}.
+\label{eq:kappa}
+\end{equation}
+%
+The linear term crosses zero at $V = \SI{3.1486}{\volt}$; the digitised
+curve bottoms at \SI{3.3346}{\volt}, so calendar stress stays positive
+across the whole range with no floor required.
 
 Two multiplicative factors move $g$ off its reference point. Temperature
 follows Arrhenius,
@@ -176,16 +203,31 @@ with $N^{\min}>0$ a regularisation floor for the singular derivative at
 $N=0$. Then
 %
 \begin{equation}
-\dQ^{\mathrm{cyc}} \;=\; c_{\mathrm{ref}}
-  \bigl(1 + c_D\,\delta\bigr)
+\dQ^{\mathrm{cyc}} \;=\; \Gamma \,
   \bigl(1 + c_C\,\hat{C}\bigr)\,
   \sigma(N)\;\varphi ,
+\qquad
+\Gamma =
+\begin{cases}
+c_{\mathrm{ref}}\bigl(1 + c_D \delta\bigr) & \text{multiplicative,}\\[2pt]
+c_{\mathrm{ref}} + c_D \delta + c_V\bigl(\bar{V} - V_c\bigr)^{2}
+  & \text{additive,}
+\end{cases}
 \label{eq:cyc}
 \end{equation}
 %
 where $\varphi$ is battery-side throughput as a fraction of capacity,
-$\delta$ the state-of-charge excursion, and $\hat{C}$ the peak C-rate.
-These three are where the bidirectional extension enters.
+$\delta$ the state-of-charge excursion, $\hat{C}$ the peak C-rate and
+$\bar{V}$ the mean cell voltage of the session. The additive branch is
+the shape Schmalstieg et al.~\cite{schmalstieg2014} Eq.~(20) fits. Its
+mean-voltage term penalises cycling about a high state of charge, which
+is where V2G operates, so omitting it understates bidirectional
+cycling. Their coefficients multiply $\sqrt{Q}$ with $Q$ the charge
+throughput in ampere-hours, so each is scaled by
+$\sqrt{2C_{\mathrm{nom}}}/2 = \num{1.012423}$ for their
+\SI{2.05}{\ampere\hour} cell to express fade per equivalent full cycle.
+$\varphi$, $\delta$ and $\hat{C}$ are where the bidirectional extension
+enters.
 
 \section{Bidirectional extension}
 \label{sec:v2g}
@@ -336,7 +378,10 @@ health column reports a raw fade fraction.
 \begin{table}[htbp]
 \centering
 \caption{Degradation parameters as implemented. LFP calendar
-coefficients are Naumann et al.\ (2018)~\cite{naumann2018} Table~7,
+coefficients are Naumann et al.~\cite{naumann2018} Table~7 and all NMC
+coefficients are Schmalstieg et al.~\cite{schmalstieg2014} Eqs.~(14)
+and~(20); LFP cycle coefficients are not from either study. LFP values
+are
 converted to the per-year differential form by
 $g(s) = \tfrac{1}{2}\,(k_{\mathrm{ref}}/100)\sqrt{S}\;k_{\mathrm{SOC}}(s)$
 with $S = 8760 \times 3600$. Cycle coefficients for both chemistries,
@@ -350,18 +395,20 @@ reference temperature appears in a per-chemistry coefficient listing.}
 \toprule
 Symbol & Quantity & LFP & NMC \\
 \midrule
-$a_0$              & calendar intercept            & \num{0.021258} & \num{0.0073} \\
-$a_1$              & calendar linear term          & \num{0}      & \num{0.0210} \\
-$a_2$              & calendar hinge coefficient    & \num{0}      & \num{0.0475} \\
-$s^{\mathrm{knee}}$& calendar knee                 & ---          & \num{0.80}   \\
-$a_3$              & calendar cubic coefficient    & \num{0.100862} & \num{0} \\
+$a_0$              & calendar intercept            & \num{0.021258} & ---          \\
+$a_3$              & calendar cubic coefficient    & \num{0.100862} & ---          \\
 $s_c$              & cubic centre                  & \num{0.50}   & ---          \\
+$\kappa$           & calendar voltage scale        & ---          & \num{0.0043184} \\
+$\mu$              & calendar voltage slope        & ---          & \num{7.543}  \\
+$\nu$              & calendar voltage intercept    & ---          & \num{-23.75} \\
 $\alpha$           & calendar time exponent        & \num{0.50}   & \num{0.75}   \\
 $E_a$              & activation energy (\si{\joule\per\mole}) & \num{17126} & \num{24000} \\
 $T^{\mathrm{ref}}$ & calendar reference temperature & \SI{25}{\celsius} & \SI{30}{\celsius} \\
-$c_{\mathrm{ref}}$ & cycle reference coefficient   & \num{0.0007} & \num{0.0009} \\
-$c_D$              & depth-of-discharge coefficient& \num{1.00}   & \num{1.00}   \\
-$c_C$              & C-rate coefficient            & \num{1.00}   & \num{1.00}   \\
+$c_{\mathrm{ref}}$ & cycle reference coefficient   & \num{0.0007} & \num{0.00076944} \\
+$c_D$              & depth coefficient             & \num{1.00}\textsuperscript{m} & \num{0.0041317}\textsuperscript{a} \\
+$c_V$              & mean-voltage coefficient      & ---          & \num{0.0074393} \\
+$V_c$              & mean-voltage centre (\si{\volt}) & ---       & \num{3.667}  \\
+$c_C$              & C-rate coefficient            & \num{1.00}   & \num{0}      \\
 $\beta$            & cycle throughput exponent     & \num{0.50}   & \num{0.50}   \\
 \midrule
 $t_{0}$ & calendar anchor age            & \multicolumn{2}{c}{\SI{1}{\yr}} \\
@@ -369,6 +416,8 @@ $H_{\mathrm{park}}$& parked hours per day          & \multicolumn{2}{c}{\num{16}
 $N^{\min}$         & cycle-slope regularisation    & \multicolumn{2}{c}{\num{1}} \\
 $\pi_{\mathrm{chem}}$ & pack cost (\si{\rupee\per\kilo\watt\hour}) & \num{7850} & \num{12400} \\
 \bottomrule
+\multicolumn{4}{l}{\footnotesize\textsuperscript{m}multiplicative branch;
+ \textsuperscript{a}additive branch of \eqref{eq:cyc}.}
 \end{tabular}
 \end{table}
 
@@ -455,68 +504,51 @@ horizons from six months to twenty years. Both checks are asserted in
 the test suite, so a later edit to a coefficient breaks a test rather
 than quietly invalidating the citation.
 
-\paragraph{NMC: Schmalstieg et al.\ (2014), in part.}
-The NMC coefficients come from Schmalstieg et
-al.~\cite{schmalstieg2014}, a Sanyo UR18650E study of more than sixty
-cells covering both calendar and cycle ageing. Four quantities are
-theirs. The calendar time exponent $\alpha = 0.75$ is their Section~3.2
-choice, adopted after a $\sqrt{t}$ law fitted their data poorly. The
-activation energy follows from the exponent $\exp(-6976/T)$ of their
-Eq.~(14), giving $E_a = 6976R = \SI{58.0}{\kilo\joule\per\mole}$ --- not
-the \SI{24}{\kilo\joule\per\mole} used in an earlier version of this
-formulation, which understates the temperature sensitivity by a factor
-of \num{2.42} and the \SIrange{25}{40}{\celsius} acceleration by
-\num{1.93}. The cycle throughput exponent $\beta = 0.5$ is their
-Eq.~(18). And the depth coefficient is fixed by the ratio of the two
-depth terms in their Eq.~(20),
-$c_D = \num{4.081e-3} / \num{7.600e-4} = \num{5.3697}$, against the
-value of unity previously assumed; the ratio is invariant to whether
-their charge throughput counts one or both directions.
+\paragraph{NMC: Schmalstieg et al.\ (2014), reproduced.}
+All NMC coefficients are from Schmalstieg et al.~\cite{schmalstieg2014},
+a Sanyo UR18650E study of more than sixty cells covering calendar and
+cycle ageing. The calendar term is their Eq.~(14) in its published
+voltage form, with $V(s)$ from Fig.~1 digitised at \SI{1}{\percent}
+intervals; one year at \SI{25}{\celsius} and \SI{50}{\percent} SOC
+gives \SI{2.395}{\percent} against the \SI{2.390}{\percent} their
+equation gives directly, the residual being digitisation. The OCV curve
+reproduces both cell voltages their text states, \SI{3.7000}{\volt}
+against \num{3.699} at \SI{50}{\percent} SOC and \SI{4.1596}{\volt}
+against \num{4.162} at full, which is $+\SI{0.18}{\percent}$ and
+$-\SI{0.24}{\percent}$ in their ageing factor. The time exponent
+$\alpha = 0.75$ is their Section~3.2 choice, adopted after a $\sqrt{t}$
+law fitted their data poorly. The activation energy follows from their
+exponent $\exp(-6976/T)$, giving
+$E_a = 6976R = \SI{58.0}{\kilo\joule\per\mole}$. The cycle terms are
+their Eq.~(20) in the additive branch of \eqref{eq:cyc}, including the
+mean-voltage term, with $\beta = 0.5$ from their Eq.~(18).
 
-Four things are \emph{not} theirs and must not be attributed. Their
-calendar ageing is parameterised on cell \emph{voltage}, linearly,
-$a_{\mathrm{cap}} \propto 7.543V - 23.75$; converting to the
-state-of-charge form of \eqref{eq:gstress} requires the OCV curve their
-Fig.~1 plots but does not tabulate, so the hinge shape here remains a
-surrogate. Their depth term is \emph{additive} where
-\eqref{eq:cyc} is multiplicative; the two agree at the fitted baseline
-and diverge away from it. Every cycle test ran at 1C and
-\SI{35}{\celsius}, so the study supports no C-rate and no
-cycle-temperature dependence at all --- $c_C$ is therefore set to zero
-rather than invented, and treated as a sensitivity parameter alongside
-$\lambda_d$. Finally their Eq.~(20) carries a mean-voltage term,
-$\num{7.348e-3}(\bar{V} - 3.667)^2$, with no counterpart here; it is
-not small, since cycling about \SI{4.0}{\volt} rather than
-\SI{3.667}{\volt} doubles their cycle coefficient. Omitting it
-understates cycling at high mean state of charge, which is where V2G
-operates.
+Two earlier values are \emph{superseded}. An activation energy of
+\SI{24}{\kilo\joule\per\mole} understated temperature sensitivity by
+\num{2.42} and the \SIrange{25}{40}{\celsius} acceleration by
+\num{1.93}; it most plausibly came from the
+\SI{24.5}{\kilo\joule\per\mole} empirical fit of
+Wang/Purewal~\cite{wang2014}, a different cell. A depth coefficient of
+unity understated depth sensitivity \num{5.37}-fold against the ratio
+their Eq.~(20) prints.
 
-\paragraph{Purewal et al.\ (2014) is not the NMC source.}
+\paragraph{A citation error, corrected.}
 An earlier version of this work cited ``Schmalstieg et al.\ (2014)''
 against the title of Wang/Purewal et al.~\cite{wang2014,purewal2014},
 conflating two distinct 2014 \emph{J.\ Power Sources} papers. Purewal
 et al.\ is a physics-based chemical--mechanical model at fixed
 \SI{50}{\percent} depth of discharge, with no state-of-charge stress
 function, a $\sqrt{t}$ calendar term, and cycle ageing as Paris'-law
-fatigue crack growth ($m = 2.2$). None of it is used here. It is
-retained in the bibliography because its Part~1 companion reports the
-empirical activation energy \SI{24.5}{\kilo\joule\per\mole} that the
-superseded \SI{24}{\kilo\joule\per\mole} most plausibly came from.
+fatigue crack growth ($m = 2.2$). None of it is used here; it is kept
+in the bibliography only because its Part~1 companion is the likely
+origin of the superseded activation energy.
 
-\paragraph{Pack costs.}
-$\pi_{\mathrm{LFP}}$ and $\pi_{\mathrm{NMC}}$ derive from a reported
-chemistry split of \SI{81}{\USD\per\kilo\watt\hour} and
-\SI{128}{\USD\per\kilo\watt\hour} at approximately
-\SI{96.81}{\rupee\per\USD}, giving \SI{7841.6}{\rupee} and
-\SI{12391.7}{\rupee}, rounded to the table values. Three cautions. These
-are \emph{global volume-weighted pack prices across applications}, not
-Indian EV replacement-pack retail quotes; the same source separately
-reports BEV packs averaging \SI{99}{\USD\per\kilo\watt\hour}, equivalent
-to \SI{9584}{\rupee\per\kilo\watt\hour}, so the NMC figure sits about
-\SI{29}{\percent} above the BEV-specific average. The exchange rate is
-undated. And this is the single exogenous monetary assumption in the
-model, so the recommended $\pm\SI{25}{\percent}$ band should accompany
-any quoted rupee figure.
+\paragraph{Cycle fade, LFP.}
+Naumann et al.~\cite{naumann2018} is calendar-only; the authors state
+the companion cycle study is unpublished. The LFP cycle coefficients
+are therefore a structural assumption of this work, with $c_D = c_C = 1$
+and the multiplicative branch, and are swept in sensitivity rather than
+cited.
 
 \paragraph{Temperature.}
 Equation~\eqref{eq:arrhenius} propagates strongly. Pack temperature is
@@ -545,6 +577,72 @@ anchor age is introduced.
 Equation~\eqref{eq:delta} uses the full-session excursion as the depth
 proxy. Validation against rainflow counting is outstanding and should
 compare \emph{offer rankings} rather than absolute fade.
+
+\section{Unresolved}
+\label{sec:unresolved}
+
+Collected here rather than scattered, in rough order of how much they
+could move a result.
+
+\paragraph{1. The pack price is the wrong kind of price.}
+$\pi_{\mathrm{chem}}$ is an OEM procurement price for new capacity.
+What a customer loses to marginal fade is not that: retail replacement
+carries labour, margin and tax; capacity is realised in money only at
+replacement or resale, not in arbitrarily small increments; and a pack
+inside an \num{8}-year warranty costs its owner little or nothing at
+the margin. The honest range therefore spans near-zero to several
+multiples of $\pi$, which is wider than a central estimate can survive.
+The documented $\pm\SI{25}{\percent}$ band understates it. This is the
+largest single uncertainty in any monetary figure here.
+
+\paragraph{2. The C-rate coefficient has no empirical support at all.}
+Schmalstieg et al.\ ran every cycle test at 1C and \SI{35}{\celsius};
+Naumann et al.\ has no cycle model. $c_C$ is set to zero and
+$\lambda_d$ exposed as a sensitivity parameter. Neither is calibrated,
+and no study located so far would calibrate them.
+
+\paragraph{3. LFP cycle ageing is unattributed.}
+See Section~\ref{sec:provenance}. A published LFP cycle study would
+close it; the companion to~\cite{naumann2018} is the obvious candidate
+if it has since appeared.
+
+\paragraph{4. The additive and multiplicative depth forms disagree
+away from the fitted baseline.}
+NMC now uses the additive branch as published. LFP still uses the
+multiplicative one, so the two chemistries do not share a functional
+form, and comparisons between them carry that difference.
+
+\paragraph{5. No multi-day coupling.}
+$N$ is a scenario input, never advanced between sessions. Benign where
+$\varphi$ is small and $\sigma$ slowly varying; degrades under V2G,
+where per-session throughput is several times larger.
+
+\paragraph{6. Temperature is a scenario constant.}
+Equation~\eqref{eq:arrhenius} propagates strongly, and more so now that
+$E_a$ for NMC is \SI{58}{\kilo\joule\per\mole} rather than
+\num{24}: a \SI{10}{\celsius} error moves calendar fade by about a
+factor of two. No fade precision beyond that assumption is supportable.
+
+\paragraph{7. The age factor has no regularisation floor.}
+$\sigma(N)$ is floored at $N^{\min}$; $\psi(t)$ is not, and grows
+without bound as $t \to 0$. Both are singular derivatives of the same
+power-law form, so this is an inconsistency rather than a choice.
+
+\paragraph{8. $\delta$ is unvalidated as a depth measure.}
+Rainflow comparison is outstanding and should compare offer
+\emph{rankings}, not absolute fade.
+
+\paragraph{9. The OCV curve is digitised, and single-cell.}
+Two points required a \SI{0.1}{\milli\volt} monotonicity repair. More
+importantly it is one cell's curve at \SI{35}{\celsius}, applied to
+every NMC pack regardless of size, age or temperature; OCV shifts with
+all three.
+
+\paragraph{10. Both parameter sets are single-cell, single-study.}
+A \SI{3}{\ampere\hour} 26650 LFP cell and a \SI{2.05}{\ampere\hour}
+18650 NMC cell, each from one laboratory campaign, stand in for every
+pack of their chemistry. Cell-to-cell and pack-level variation is not
+represented.
 
 \begin{thebibliography}{9}
 

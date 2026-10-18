@@ -100,6 +100,16 @@ SESSION = {
 #: saying so is more honest than naming whichever axis won by 0.01.
 LEAD_MARGIN = 0.08
 
+#: A customer's stated ready-by deadline.  Amenity is defined against this
+#: rather than against "earliest of whatever happens to be on the menu":
+#: relative earliness has no meaning to someone who only cares that the car
+#: is ready before they leave, and scoring it that way made the amenity
+#: axis track target SOC instead, so it selected the fullest offers
+#: regardless of what they cost.
+AMENITY_DEADLINE_MINUTE = 6 * 60          # 06:00
+#: Hours past the deadline at which amenity has decayed to zero.
+AMENITY_DECAY_HOURS = 3.0
+
 
 def wear_rs(offer: V2GOffer) -> float:
     """Rupees of pack this session consumes, via the Phase 11 mapping.
@@ -169,27 +179,41 @@ def orientation_scores(
 
     health  -- how little pack it spends, against the menu's own range.
     savings -- how much money it returns.
-    amenity -- ready early AND with range in hand.  Those are the two
-               halves of the convenience-driven customer's utility in
-               Phase 11 (delay aversion and target preference), and they
-               move together, so they are averaged rather than ranked.
+    amenity -- the car is ready by the stated deadline, with range in
+               hand.  Meeting the deadline is worth full marks; being
+               earlier than needed is worth nothing extra, which is the
+               point -- scoring relative earliness turned this axis into
+               a second target-SOC axis.
     """
     fades = [o.capacity_fade for o in offers]
     savings = [o.saving for o in offers]
-    readies = [float(o.ready_minute) for o in offers]
     targets = [o.target_soc for o in offers]
 
     def unit(value: float, column: Sequence[float]) -> float:
         low, high = min(column), max(column)
         return 0.0 if high - low < _EPSILON else (value - low) / (high - low)
 
+    # Amenity is built first, then rescaled onto [0, 1] like the other
+    # two.  Punctuality saturates at 1 for anything meeting the deadline,
+    # so without rescaling the axis sits in [0.5, 1] and wins the argmax
+    # for most of the menu -- it took four labels to savings' one.
+    raw_amenity = {}
+    for offer in offers:
+        minutes_late = (offer.ready_minute % 1440) - AMENITY_DEADLINE_MINUTE
+        punctuality = (
+            1.0 if minutes_late <= 0.0
+            else max(0.0, 1.0 - minutes_late / (AMENITY_DECAY_HOURS * 60.0))
+        )
+        raw_amenity[offer.offer_id] = 0.5 * punctuality + 0.5 * unit(
+            offer.target_soc, targets
+        )
+    amenity_column = list(raw_amenity.values())
+
     scores = {}
     for offer in offers:
         health = 1.0 - unit(offer.capacity_fade, fades)
         saving = unit(offer.saving, savings)
-        amenity = 0.5 * (1.0 - unit(float(offer.ready_minute), readies)) + 0.5 * unit(
-            offer.target_soc, targets
-        )
+        amenity = unit(raw_amenity[offer.offer_id], amenity_column)
         scores[offer.offer_id] = (health, amenity, saving)
     return scores
 
@@ -203,24 +227,45 @@ def orientation_label(scores: tuple[float, float, float]) -> str:
     return ranked[0][1]
 
 
-def intent_anchors(offers: Sequence[V2GOffer]) -> list[tuple[V2GOffer, str]]:
-    """The true optimum of each intent, plus one anchor per target SOC.
+def intent_anchors(
+    offers: Sequence[V2GOffer], baseline_fade: float | None = None
+) -> list[tuple[V2GOffer, str]]:
+    """The representative offer for each intent.
 
-    Amenity is "ready soonest, then fullest": the convenience-driven
-    customer of Phase 11 wants the car usable early and with range in
-    hand, and those two move together.
+    Health is least fade.  Savings is best NET value, not largest
+    advertised saving.  Amenity is the fullest offer that meets the
+    stated ready-by deadline.  None of the three may be an offer whose
+    saving is smaller than the pack it consumes.
     """
     anchors: list[tuple[V2GOffer, str]] = []
     seen: set[str] = set()
+    floor = min(o.capacity_fade for o in offers) if baseline_fade is None else baseline_fade
+
+    def net(offer: V2GOffer) -> float:
+        return offer.saving - marginal_wear_rs(offer, floor)
+
+    # An offer that destroys value should never REPRESENT an intent, even
+    # if it is the extreme point on that axis.  Without this the amenity
+    # anchor picked a row returning Rs 11.90 against Rs 42.41 of pack.
+    worthwhile = [o for o in offers if net(o) > 0.0] or list(offers)
 
     def take(offer: V2GOffer, label: str) -> None:
         if offer.offer_id not in seen:
             seen.add(offer.offer_id)
             anchors.append((offer, label))
 
-    take(min(offers, key=lambda o: (o.capacity_fade, -o.saving, o.offer_id)), "health")
-    take(max(offers, key=lambda o: (o.saving, -o.capacity_fade, o.offer_id)), "savings")
-    take(min(offers, key=lambda o: (o.ready_minute, -o.target_soc, o.offer_id)), "amenity")
+    take(min(offers, key=lambda o: (o.capacity_fade, -net(o), o.offer_id)), "health")
+    # Max NET, not max saving.  advertised_saving is measured against a
+    # per-target BAU baseline, so argmax(saving) selects the highest target
+    # by construction -- the Phase 11 menu-design defect.  On this session
+    # it picks 100% at Rs 143.72 netting Rs 81.86 over 88% at Rs 137.62
+    # netting Rs 94.46: six rupees more saving for nineteen more pack.
+    take(max(worthwhile, key=lambda o: (net(o), -o.capacity_fade, o.offer_id)), "savings")
+    on_time = [
+        o for o in worthwhile
+        if (o.ready_minute % 1440) <= AMENITY_DEADLINE_MINUTE
+    ] or worthwhile
+    take(max(on_time, key=lambda o: (o.target_soc, net(o), o.offer_id)), "amenity")
     return anchors
 
 
@@ -306,14 +351,17 @@ def render(chosen: Sequence[tuple[V2GOffer, str]], universe: Sequence[V2GOffer])
               f"{wear:8.2f} {offer.saving - wear:8.2f} "
               f"{offer.import_energy_kwh:7.2f} {offer.export_energy_kwh:7.2f}  {mode:<4} "
               f"{orientation_label((health, amenity, saving)):<9} "
-              f"{health:.2f}/{amenity:.2f}/{saving:.2f}")
+              f"{health:.2f}/{amenity:.2f}/{saving:.2f}"
+              f"{'   <- costs more pack than it returns' if offer.saving - wear < 0 else ''}")
     counts: dict[str, int] = {}
     for offer, _ in chosen:
         counts[orientation_label(scores[offer.offer_id])] = counts.get(
             orientation_label(scores[offer.offer_id]), 0) + 1
     print("\n  orientation mix: " + ", ".join(
         f"{k} {v}" for k, v in sorted(counts.items())))
-    print(f"  modes: V1G {len(chosen) - v2g}, V2G {v2g}")
+    negative = sum(1 for o, _ in chosen if o.saving - marginal_wear_rs(o, baseline) < 0)
+    print(f"  modes: V1G {len(chosen) - v2g}, V2G {v2g};"
+          f" {negative} offer(s) net-negative")
     print(f"  minimum pairwise separation: {minimum_separation(chosen, spans):.4f}")
     print(f"  battery = marginal pack spend vs the least-fade row "
           f"({wear_rs(min(universe, key=lambda o: o.capacity_fade)):.2f} Rs absolute), "
