@@ -61,6 +61,18 @@ TARIFF_MEAN_USD_PER_KWH = 0.16          # US residential order of magnitude
 _RUPEE_TARIFF_MEAN = 5.117              # mean of default_tou_profile(30)
 TARIFF_SCALE = TARIFF_MEAN_USD_PER_KWH / _RUPEE_TARIFF_MEAN
 
+#: The saving machinery carries ABSOLUTE currency tolerances: offers are
+#: banded to within `band_tolerance` of a saving level, and compacted by
+#: merging any two within `merge_tolerance`.  Scaling the tariff without
+#: scaling these changes the menu rather than just relabelling it --
+#: rupee-sized tolerances against dollar savings merge offers a rupee run
+#: keeps apart, and generating natively in USD with unscaled tolerances
+#: gave 38 displayed offers where the rupee run gave 149.  Both are
+#: therefore scaled by the same factor, so the discretisation stays
+#: proportional to the spread it is discretising.
+BAND_TOLERANCE_USD = 0.5 * TARIFF_SCALE
+MERGE_TOLERANCE_USD = 5.0 * TARIFF_SCALE
+
 #: Pack cost, USD per kWh.  The RESIDUAL-VALUE basis, not a new-pack
 #: price.  What an owner loses to marginal fade is the value of used
 #: capacity, which Hein et al. (2012) model endogenously at roughly
@@ -81,6 +93,7 @@ from evmenu.degradation import (
     SCHMALSTIEG_NMC_2014_PARAMETERS,
 )
 from evmenu_v2g import V2GEnvelope, generate_ev_menu_v2g
+from evmenu_v2g.api import default_tou_profile
 from evmenu_v2g.menu import V2GOffer, compact, pareto_filter
 
 MENU_SIZE = 15
@@ -124,6 +137,9 @@ SESSION = {
     # nothing between arrival and 0.8, so the health end of its menu is a
     # single "decline" row.
     "target_tier_count": 6,
+    "price_profile": tuple(p * TARIFF_SCALE for p in default_tou_profile(30)),
+    "band_tolerance": BAND_TOLERANCE_USD,
+    "merge_tolerance": MERGE_TOLERANCE_USD,
     # The published parameter sets, not the shipped literature-anchor
     # surrogates.  Naumann et al. (2018) for LFP, Schmalstieg et al.
     # (2014) for NMC.  Set both to None to reproduce the older numbers.
@@ -149,14 +165,17 @@ AMENITY_DECAY_HOURS = 3.0
 
 
 def saving_usd(offer: V2GOffer) -> float:
-    """The offer's saving in USD.
+    """The offer's saving, already in USD.
 
-    The menu is generated against the rupee-denominated tariff, so its
-    savings carry that unit.  Scaling here rather than regenerating
-    keeps the SHAPE of the tariff -- which is what the optimiser
-    actually responds to -- identical to every earlier run.
+    The menu is now GENERATED against the scaled tariff, so no
+    conversion happens here.  An earlier version generated in rupees and
+    multiplied afterwards; that is exact per offer, because saving is
+    linear in the price vector, but it is not the same menu -- the
+    absolute band and merge tolerances were still rupee-sized, so the
+    composition came from a finer discretisation than the currency
+    warranted.
     """
-    return offer.saving * TARIFF_SCALE
+    return offer.saving
 
 
 def wear_rs(offer: V2GOffer) -> float:

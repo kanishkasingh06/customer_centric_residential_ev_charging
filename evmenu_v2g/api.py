@@ -172,6 +172,7 @@ def generate_ev_menu_v2g(
     maximum_ready_steps: int = 4,
     target_tiers: tuple[float, ...] | None = (0.8, 1.0),
     target_tier_count: int | None = None,
+    merge_tolerance: float = 5.0,
     lfp_parameters: ChemistryDegradationParameters | None = None,
     nmc_parameters: ChemistryDegradationParameters | None = None,
 ) -> V2GMenu:
@@ -243,7 +244,11 @@ def generate_ev_menu_v2g(
         target_tiers=target_tiers,
         target_tier_count=target_tier_count,
     )
-    compacted = compact(offers)
+    # band_tolerance and merge_tolerance are ABSOLUTE currency amounts, so
+    # they have to be scaled with the tariff.  A tolerance sized for one
+    # currency silently changes the menu in another: rupee-sized values
+    # against dollar savings merge offers a rupee run keeps apart.
+    compacted = compact(offers, merge_tolerance=merge_tolerance)
     efficient = pareto_filter(compacted)
     # An offer that still imports and exports in the same interval cannot be
     # run by a single inverter and its quoted fade counts both directions, so
