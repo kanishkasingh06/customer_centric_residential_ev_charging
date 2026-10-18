@@ -73,6 +73,41 @@ TARIFF_SCALE = TARIFF_MEAN_USD_PER_KWH / _RUPEE_TARIFF_MEAN
 BAND_TOLERANCE_USD = 0.5 * TARIFF_SCALE
 MERGE_TOLERANCE_USD = 5.0 * TARIFF_SCALE
 
+#: Peak-to-trough ratio of the tariff.  The illustrative profile this
+#: work inherited spans 4.0x, which is wide for a residential tariff and
+#: flatters V2G: the spread IS the arbitrage opportunity, so every
+#: export offer's value scales with it.  A standard domestic ToU is
+#: nearer 2x (UK Economy 7, most US residential ToU); a dedicated EV
+#: tariff is wider, around 3-4x (Octopus Go and similar).  An EV owner
+#: is plausibly on the latter, so 3.0 is the default, but it is an
+#: assumption and the sweep below is the honest way to report it.
+#:
+#: Measured on the worked Kia menu, mean held fixed:
+#:     ratio   V2G offers   best net   wear as % of saving
+#:      4.0      11 of 15     $4.06            11%
+#:      3.0      10 of 15     $2.99            14%
+#:      2.5       9 of 15     $2.28            16%
+#:      2.0       8 of 15     $1.51            20%
+#:      1.6       0 of 15     $0.84            29%
+#: Below about 1.6x no offer exports at all: the spread no longer covers
+#: the round-trip loss and the fade the export costs.
+TARIFF_PEAK_TROUGH_RATIO = 3.0
+
+
+def _tariff_usd(ratio: float = TARIFF_PEAK_TROUGH_RATIO) -> tuple[float, ...]:
+    """The inherited duck-curve shape, compressed to `ratio` and scaled.
+
+    Compression is affine about the mean, so the SHAPE -- which hour is
+    dear and which is cheap -- is untouched; only the amplitude moves.
+    Holding the mean fixed keeps the level comparable across ratios, so
+    a change in savings is attributable to the spread alone.
+    """
+    base = [float(p) for p in default_tou_profile(30)]
+    mean = sum(base) / len(base)
+    above, below = max(base) - mean, mean - min(base)
+    alpha = mean * (ratio - 1.0) / (above + ratio * below)
+    return tuple((mean + alpha * (p - mean)) * TARIFF_SCALE for p in base)
+
 #: Pack cost, USD per kWh.  The RESIDUAL-VALUE basis, not a new-pack
 #: price.  What an owner loses to marginal fade is the value of used
 #: capacity, which Hein et al. (2012) model endogenously at roughly
@@ -137,7 +172,7 @@ SESSION = {
     # nothing between arrival and 0.8, so the health end of its menu is a
     # single "decline" row.
     "target_tier_count": 6,
-    "price_profile": tuple(p * TARIFF_SCALE for p in default_tou_profile(30)),
+    "price_profile": _tariff_usd(),
     "band_tolerance": BAND_TOLERANCE_USD,
     "merge_tolerance": MERGE_TOLERANCE_USD,
     # The published parameter sets, not the shipped literature-anchor
