@@ -377,47 +377,48 @@ health column reports a raw fade fraction.
 
 \begin{table}[htbp]
 \centering
-\caption{Degradation parameters as implemented. LFP calendar
-coefficients are Naumann et al.~\cite{naumann2018} Table~7 and all NMC
-coefficients are Schmalstieg et al.~\cite{schmalstieg2014} Eqs.~(14)
-and~(20); LFP cycle coefficients are not from either study. LFP values
-are
-converted to the per-year differential form by
-$g(s) = \tfrac{1}{2}\,(k_{\mathrm{ref}}/100)\sqrt{S}\;k_{\mathrm{SOC}}(s)$
-with $S = 8760 \times 3600$. Cycle coefficients for both chemistries,
-and all NMC calendar coefficients, are not drawn from either cited
-study; see Section~\ref{sec:provenance}. The upper block is
-chemistry-specific and immutable; the lower block holds scenario
-settings shared across chemistries, which is why no reference age or
-reference temperature appears in a per-chemistry coefficient listing.}
+\caption{Degradation parameters as implemented, for the published
+parameter sets. LFP calendar is Naumann et al.~\cite{naumann2018}
+Table~7 and LFP cycle is Naumann et al.~\cite{naumann2020} Eqs.~(8)
+and~(10); all NMC coefficients are Schmalstieg et
+al.~\cite{schmalstieg2014} Eqs.~(14) and~(20). Only $c_C$ for NMC is
+not from a cited study: no study supports one, so it is zero and swept
+(Section~\ref{sec:unresolved}). A dash means the term is unused by that
+chemistry's functional form, not that it is zero by coincidence. The
+upper block is chemistry-specific; the lower block holds scenario
+settings shared across chemistries.}
 \label{tab:params}
 \begin{tabular}{llrr}
 \toprule
 Symbol & Quantity & LFP & NMC \\
 \midrule
-$a_0$              & calendar intercept            & \num{0.021258} & ---          \\
-$a_3$              & calendar cubic coefficient    & \num{0.100862} & ---          \\
-$s_c$              & cubic centre                  & \num{0.50}   & ---          \\
-$\kappa$           & calendar voltage scale        & ---          & \num{0.0043184} \\
-$\mu$              & calendar voltage slope        & ---          & \num{7.543}  \\
-$\nu$              & calendar voltage intercept    & ---          & \num{-23.75} \\
-$\alpha$           & calendar time exponent        & \num{0.50}   & \num{0.75}   \\
-$E_a$              & activation energy (\si{\joule\per\mole}) & \num{17126} & \num{24000} \\
-$T^{\mathrm{ref}}$ & calendar reference temperature & \SI{25}{\celsius} & \SI{30}{\celsius} \\
-$c_{\mathrm{ref}}$ & cycle reference coefficient   & \num{0.0007} & \num{0.00076944} \\
-$c_D$              & depth coefficient             & \num{1.00}\textsuperscript{m} & \num{0.0041317}\textsuperscript{a} \\
-$c_V$              & mean-voltage coefficient      & ---          & \num{0.0074393} \\
-$V_c$              & mean-voltage centre (\si{\volt}) & ---       & \num{3.667}  \\
-$c_C$              & C-rate coefficient            & \num{1.00}   & \num{0}      \\
-$\beta$            & cycle throughput exponent     & \num{0.50}   & \num{0.50}   \\
+\multicolumn{4}{l}{\emph{Calendar}} \\
+$a_0$              & SOC-form intercept            & \num{0.0212579} & ---          \\
+$a_3$              & SOC-form cubic coefficient    & \num{0.1008624} & ---          \\
+$s_c$              & cubic centre                  & \num{0.50}      & ---          \\
+$\kappa$           & voltage-form scale            & ---             & \num{0.0043184} \\
+$\mu$              & voltage-form slope            & ---             & \num{7.543}  \\
+$\nu$              & voltage-form intercept        & ---             & \num{-23.75} \\
+$\alpha$           & time exponent                 & \num{0.50}      & \num{0.75}   \\
+$E_a$              & activation energy (\si{\joule\per\mole}) & \num{17126} & \num{58002} \\
+$T^{\mathrm{ref}}$ & reference temperature         & \SI{25}{\celsius} & \SI{25}{\celsius} \\
 \midrule
+\multicolumn{4}{l}{\emph{Cycle} (additive branch of \eqref{eq:cyc} for both)} \\
+$c_{\mathrm{ref}}$ & reference coefficient         & \num{0.00053031} & \num{0.00076944} \\
+$c_D$              & linear depth coefficient      & ---              & \num{0.0041317} \\
+$c_{D3}$           & cubic depth coefficient       & \num{0.00195428} & ---          \\
+$\delta_c$         & cubic depth centre            & \num{0.60}       & ---          \\
+$c_V$              & mean-voltage coefficient      & ---              & \num{0.0074393} \\
+$V_c$              & mean-voltage centre (\si{\volt}) & ---           & \num{3.667}  \\
+$c_C$              & C-rate coefficient            & \num{0.6488157}  & \num{0}      \\
+$\beta$            & throughput exponent           & \num{0.50}       & \num{0.50}   \\
+\midrule
+\multicolumn{4}{l}{\emph{Scenario}} \\
 $t_{0}$ & calendar anchor age            & \multicolumn{2}{c}{\SI{1}{\yr}} \\
 $H_{\mathrm{park}}$& parked hours per day          & \multicolumn{2}{c}{\num{16}} \\
 $N^{\min}$         & cycle-slope regularisation    & \multicolumn{2}{c}{\num{1}} \\
 $\pi_{\mathrm{chem}}$ & pack cost (\si{\rupee\per\kilo\watt\hour}) & \num{7850} & \num{12400} \\
 \bottomrule
-\multicolumn{4}{l}{\footnotesize\textsuperscript{m}multiplicative branch;
- \textsuperscript{a}additive branch of \eqref{eq:cyc}.}
 \end{tabular}
 \end{table}
 
@@ -519,7 +520,7 @@ $-\SI{0.24}{\percent}$ in their ageing factor. The time exponent
 $\alpha = 0.75$ is their Section~3.2 choice, adopted after a $\sqrt{t}$
 law fitted their data poorly. The activation energy follows from their
 exponent $\exp(-6976/T)$, giving
-$E_a = 6976R = \SI{58.0}{\kilo\joule\per\mole}$. The cycle terms are
+$E_a = 6976R = \SI{58002}{\joule\per\mole}$ (the paper, rounding $R$ to \num{8.314}, prints \SI{58.0}{\kilo\joule\per\mole}; the stored value reproduces their \emph{exponent} under CODATA $R$). The cycle terms are
 their Eq.~(20) in the additive branch of \eqref{eq:cyc}, including the
 mean-voltage term, with $\beta = 0.5$ from their Eq.~(18).
 
