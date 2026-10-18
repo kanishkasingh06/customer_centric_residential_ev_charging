@@ -43,10 +43,24 @@ import numpy as np
 
 ATTRIBUTES = ("cost", "wear", "delay", "soc", "export")
 
-#: Utils per unit of money for the reference customer.  Unit-free: it
-#: means the same thing in pounds as it did in rupees, provided the menu
-#: and the pack cost are in the same unit.
-REFERENCE_MONEY_WEIGHT = 0.020
+#: Utils per unit of money for the reference customer.  This is NOT
+#: unit-free -- an earlier comment here claimed it was, and that was
+#: wrong.  It converts currency into utility, so changing the currency
+#: changes it inversely: 0.020 was calibrated against a rupee menu whose
+#: costs spanned about 140, and the same value against a dollar menu
+#: spanning 5.5 contributes 32x less utility.
+#:
+#: The symptom was silent and severe.  With the rupee value left in
+#: place on a dollar menu, the drawn cost and wear coefficients came out
+#: near 0.013 against 0.81 for delay -- on a menu where every offer met
+#: the deadline, so delay had zero variance.  Choice was being decided
+#: by an attribute that did not vary, and a 40x sweep of wear
+#: internalisation moved the V2G share by 0.4 points.
+#:
+#: Anchored instead to the spread of the menu it scores: a reference
+#: customer gets about one util per currency unit of the cost range.
+#: Set it explicitly when the currency changes.
+REFERENCE_MONEY_WEIGHT = 0.64
 
 #: End of life, as a fraction of initial capacity lost.  Wear is priced
 #: as a write-down of the WHOLE pack over the fade it survives, not of
@@ -262,3 +276,94 @@ def with_export_aversion(
 ) -> tuple[SegmentSpec, ...]:
     """The same segments with a declared export disutility, for sweeps."""
     return tuple(replace(s, export=export) for s in segments)
+
+
+# ---------------------------------------------------------------------------
+# simulation: sampled choices, and per-offer shares
+# ---------------------------------------------------------------------------
+
+
+def sample_choices(
+    probabilities: np.ndarray, rng: np.random.Generator
+) -> np.ndarray:
+    """One sampled choice index per row of `probabilities`.
+
+    Inverse-CDF on each row.  Sampling rather than taking the argmax is
+    what makes a fleet aggregate meaningful: Phase 11 found that every
+    DETERMINISTIC policy drives the coincidence factor toward 1.0 and
+    makes the feeder peak worse, while probabilistic choice holds it at
+    0.27-0.63.  The diversity comes from choice being stochastic at all.
+    """
+    cumulative = np.cumsum(probabilities, axis=1)
+    draws = rng.random((probabilities.shape[0], 1))
+    return (draws < cumulative).argmax(axis=1)
+
+
+@dataclass(frozen=True)
+class MenuChoice:
+    """Both outputs a menu study needs, from one pass.
+
+    ``offer_share`` is the mean choice probability per offer, for
+    evaluating a menu design.  ``sampled`` is one realised choice per
+    simulated customer, for aggregating into feeder load.  They come
+    from the same draws, so the two analyses cannot disagree about the
+    population they describe.
+    """
+
+    offer_share: tuple[float, ...]
+    sampled: np.ndarray
+    segment_of: np.ndarray
+    no_charge_share: float
+
+
+def simulate_menu(
+    attributes: np.ndarray,
+    segments: Sequence[SegmentSpec] = SEGMENTS,
+    mix: Sequence[float] | None = None,
+    *,
+    customers: int = 2000,
+    seed: int = 0,
+    normalise_scale: bool = True,
+    no_charge_rows: Sequence[int] = (),
+) -> MenuChoice:
+    """Simulate a population choosing from one menu.
+
+    ``mix`` is the share of customers in each segment, defaulting to
+    equal.  ``no_charge_rows`` are the indices of offers that draw no
+    energy, so ``no_charge_share`` can be reported -- Phase 11 found
+    36-67% of plugged-in vehicles draw nothing, and that it is only
+    measurable because declining is in the choice set at all.
+    """
+    if mix is None:
+        mix = [1.0 / len(segments)] * len(segments)
+    if len(mix) != len(segments):
+        raise ValueError("mix must have one share per segment")
+    total = float(sum(mix))
+    if total <= 0.0 or any(m < 0.0 for m in mix):
+        raise ValueError("mix shares must be non-negative and not all zero")
+    weights = [m / total for m in mix]
+
+    rng = np.random.default_rng(seed)
+    counts = [round(customers * w) for w in weights]
+    counts[-1] = max(0, customers - sum(counts[:-1]))
+
+    chosen, who, shares = [], [], np.zeros(attributes.shape[0])
+    for index, (segment, count) in enumerate(zip(segments, counts, strict=True)):
+        if count == 0:
+            continue
+        betas = draw_coefficients(segment, count, rng, normalise_scale=normalise_scale)
+        probabilities = choice_probabilities(utilities(attributes, betas))
+        chosen.append(sample_choices(probabilities, rng))
+        who.append(np.full(count, index))
+        shares += probabilities.sum(axis=0)
+
+    sampled = np.concatenate(chosen) if chosen else np.empty(0, dtype=int)
+    segment_of = np.concatenate(who) if who else np.empty(0, dtype=int)
+    shares = shares / max(1, sampled.size)
+    declined = float(np.isin(sampled, list(no_charge_rows)).mean()) if sampled.size else 0.0
+    return MenuChoice(
+        offer_share=tuple(float(x) for x in shares),
+        sampled=sampled,
+        segment_of=segment_of,
+        no_charge_share=declined,
+    )
