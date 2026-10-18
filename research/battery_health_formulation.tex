@@ -613,14 +613,59 @@ multiples of $\pi$, which is wider than a central estimate can survive.
 The documented $\pm\SI{25}{\percent}$ band understates it. This is the
 largest single uncertainty in any monetary figure here.
 
-\paragraph{2. Shallow-cycle fade is the least trustworthy region, and
-V2G sits in it.}
-Naumann et al.~\cite{naumann2020} report unsteady, partly reversible
-capacity loss below \SI{80}{\percent} depth of cycle, with the
-mechanism unexplained, and fit their depth factor on the
-\SI{80}{\percent} and \SI{100}{\percent} points only. Arbitrage
-cycling is shallow by nature, so the V2G offers on a menu are priced in
-the region the source study is least confident about.
+\paragraph{2. Shallow-cycle fade is substantially \emph{reversible},
+and V2G sits in exactly that region.}
+Naumann et al.~\cite{naumann2020} fit their depth factor on the
+\SI{80}{\percent} and \SI{100}{\percent} points only, because
+shallower cycling showed unsteady loss they could not explain. The
+follow-up study~\cite{spingler2020} explains it, and the explanation
+matters more than the uncertainty did.
+
+Cycling anywhere between \SI{30}{\percent} and \SI{70}{\percent} SOC
+--- where the LFP equilibrium voltage curve is flat --- produces
+\emph{larger} capacity losses than full cycles, up to
+\SI{21}{\percent} after 1000 FEC against \SI{6}{\percent} for full
+cycles. But most of it is not degradation. Holding the cell at
+\SI{0}{\percent} or \SI{100}{\percent} SOC recovers it: after 35 days
+at \SI{2}{\volt}, \SI{89}{\percent} of the lost capacity returned.
+Post-mortem analysis attributes the loss to non-uniform lithium
+distribution across the electrodes rather than lithium inventory loss,
+and the same cells after full cycling showed almost no recoverable
+capacity.
+
+Two consequences, pulling opposite ways. Pricing shallow V2G cycling
+at the \cite{naumann2020} rate \emph{overstates} permanent damage,
+because a large part of the measured loss is recoverable. But the
+capacity is genuinely unavailable to the customer until a recovery
+hold is performed, and no residential charging schedule will park a
+car at \SI{0}{\percent} SOC for a week. So the fade is neither as
+permanent as the cycle model implies nor as harmless as reversibility
+suggests, and this formulation represents neither state. Any V2G
+result for an LFP pack cycling in the \SIrange{30}{70}{\percent}
+window should say so.
+
+\paragraph{2b. The two LFP cycle studies disagree with each other.}
+Wang et al.~\cite{wang2011} fit a graphite-LiFePO$_4$ cycle model on
+an A123 \SI{2.2}{\ampere\hour} cell over
+\SIrange{-30}{60}{\celsius} and C/2 to 10C, and reach two conclusions
+opposite to~\cite{naumann2020} on the Sony/Murata cell. They find
+depth of discharge has \emph{negligible} effect on capacity fade,
+where~\cite{naumann2020} fit a cubic spanning \num{6.06} from zero to
+full depth. And they find a strong Arrhenius temperature dependence on
+cycle ageing, $E_a = \SI{31.5}{\kilo\joule\per\mole}$,
+where~\cite{naumann2020} report the influence between
+\SI{25}{\celsius} and \SI{40}{\celsius} as negligible and carry no
+cycle temperature term at all. The two agree only on the throughput
+exponent, $z \approx 0.55$ against \num{0.5}.
+
+Both are credible studies on commercial LFP cells. The implication is
+that the LFP cycle parameterisation adopted here is not robust across
+cell designs, and that the depth and temperature terms in particular
+should be treated as cell-specific rather than chemistry-specific.
+\cite{wang2011} also supplies a C-rate mechanism this formulation does
+not represent: their activation energy falls linearly with rate,
+$E_a = 31700 - 370.3\,C$, so rate and temperature interact rather than
+multiplying independently.
 
 \paragraph{3. The NMC C-rate coefficient still has no support.}
 Schmalstieg et al.\ ran every cycle test at 1C and \SI{35}{\celsius},
@@ -684,6 +729,19 @@ M.~Naumann, F.~B. Spingler, A.~Jossen,
 LiFePO$_4$/graphite cell,''
 \emph{Journal of Power Sources}, vol.~451, 227666, 2020.
 doi:10.1016/j.jpowsour.2019.227666
+
+\bibitem{spingler2020}
+F.~B. Spingler, M.~Naumann, A.~Jossen,
+``Capacity recovery effect in commercial LiFePO$_4$/graphite cells,''
+\emph{Journal of The Electrochemical Society}, vol.~167, 040526, 2020.
+doi:10.1149/1945-7111/ab7900
+
+\bibitem{wang2011}
+J.~Wang, P.~Liu, J.~Hicks-Garner, E.~Sherman, S.~Soukiazian,
+M.~Verbrugge, H.~Tataria, J.~Musser, P.~Finamore,
+``Cycle-life model for graphite-LiFePO$_4$ cells,''
+\emph{Journal of Power Sources}, vol.~196, no.~8, pp.~3942--3948, 2011.
+doi:10.1016/j.jpowsour.2010.11.134
 
 \bibitem{wang2014}
 J.~Wang, J.~Purewal, P.~Liu, J.~Hicks-Garner, S.~Soukazian, E.~Sherman,

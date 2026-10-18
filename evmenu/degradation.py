@@ -490,11 +490,29 @@ SCHMALSTIEG_NMC_2014_PARAMETERS = ChemistryDegradationParameters(
 #: branch used here, Gamma * 2 = k_Crate * k_DOC / 100 at C = 0, scales
 #: both depth terms by 0.0971/200.
 #:
-#: Caveat the authors state: test points below 80% depth showed unsteady,
-#: partly reversible capacity loss that the model does not represent, so
-#: k_DOC was fitted on the 80% and 100% points only.  Shallow-cycle fade
-#: is the least trustworthy region of this parameterisation, and V2G
-#: arbitrage sits in it.
+#: Two caveats, both load-bearing for V2G.
+#:
+#: Shallow cycling is REVERSIBLE, and this model treats it as permanent.
+#: k_DOC was fitted on the 80% and 100% depth points only, because
+#: shallower cycling showed unsteady loss the authors could not explain
+#: at the time.  Spingler, Naumann and Jossen (2020), J. Electrochem.
+#: Soc. 167 040526, doi:10.1149/1945-7111/ab7900, explain it: cycling
+#: between 30% and 70% SOC, where the LFP voltage curve is flat, loses
+#: up to 21% capacity by 1000 FEC against 6% for full cycles, but
+#: holding at 0% or 100% SOC recovers 89% of it within 35 days.  The
+#: cause is non-uniform lithium distribution, not inventory loss.  So
+#: this parameterisation OVERSTATES permanent damage for shallow cycles
+#: -- which is where V2G arbitrage operates -- while the capacity is
+#: still unavailable to a customer who never performs a recovery hold.
+#: The model represents neither state.
+#:
+#: The depth and temperature terms are cell-specific, not chemistry-
+#: specific.  Wang et al. (2011), J. Power Sources 196(8) 3942-3948,
+#: doi:10.1016/j.jpowsour.2010.11.134, fit an A123 LFP cell and reach
+#: the opposite conclusion on both: depth of discharge negligible where
+#: this model has a 6.06x cubic, and a strong cycle Arrhenius term
+#: (Ea = 31.5 kJ/mol) where this model has none.  They agree only on the
+#: throughput exponent.  Treat both terms as a sensitivity axis.
 NAUMANN_LFP_2020_CYCLE_PARAMETERS = ChemistryDegradationParameters(
     calendar_a0=NAUMANN_LFP_2018_PARAMETERS.calendar_a0,
     calendar_a1=NAUMANN_LFP_2018_PARAMETERS.calendar_a1,
