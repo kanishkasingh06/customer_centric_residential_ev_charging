@@ -11,7 +11,8 @@ pin what is NOT theirs, so a later reader does not over-attribute.
 
 from __future__ import annotations
 
-from math import exp
+from itertools import pairwise
+from math import exp, sqrt
 
 import pytest
 
@@ -19,7 +20,9 @@ from evmenu.degradation import _GAS_CONSTANT_J_PER_MOL_K as R
 from evmenu.degradation import (
     DEFAULT_NMC_PARAMETERS,
     SCHMALSTIEG_NMC_2014_PARAMETERS,
+    calendar_soc_stress,
 )
+from evmenu.ocv import SANYO_UR18650E_OCV, interpolate_ocv
 
 PARAMS = SCHMALSTIEG_NMC_2014_PARAMETERS
 
@@ -55,15 +58,24 @@ def test_calendar_time_exponent_is_their_choice_of_t_to_the_three_quarters() -> 
     assert PARAMS.calendar_time_exponent == 0.75
 
 
-def test_depth_coefficient_is_the_ratio_printed_in_equation_twenty() -> None:
+def test_cycle_terms_are_equation_twenty_scaled_per_full_cycle() -> None:
     """b_cap = 7.348e-3(Vbar-3.667)^2 + 7.600e-4 + 4.081e-3*dDOD.
 
-    The depth-to-baseline ratio is what this package's multiplicative
-    ``(1 + c_D * delta)`` has to reproduce, and it is invariant to whether
-    their charge throughput counts one or both directions.
+    Eq. (20) applies to sqrt(charge throughput in Ah); matching cumulative
+    fade per equivalent full cycle for their 2.05 Ah cell scales every
+    term by sqrt(2*2.05)/2.  The depth form is ADDITIVE, as they fit it.
     """
-    assert PARAMS.cycle_dod_coefficient == pytest.approx(4.081e-3 / 7.600e-4, rel=1e-4)
-    assert PARAMS.cycle_dod_coefficient == pytest.approx(5.3697, abs=1e-4)
+    scale = sqrt(2 * 2.05) / 2.0
+    assert PARAMS.cycle_depth_is_additive is True
+    assert PARAMS.cycle_reference_coefficient == pytest.approx(scale * 7.600e-4, rel=1e-9)
+    assert PARAMS.cycle_dod_coefficient == pytest.approx(scale * 4.081e-3, rel=1e-9)
+    assert PARAMS.cycle_mean_voltage_coefficient == pytest.approx(scale * 7.348e-3, rel=1e-9)
+    assert PARAMS.cycle_mean_voltage_center == 3.667
+    # the depth-to-baseline ratio is what the paper pins, and it survives
+    # the scaling whatever the throughput convention
+    assert PARAMS.cycle_dod_coefficient / PARAMS.cycle_reference_coefficient == pytest.approx(
+        4.081e-3 / 7.600e-4, rel=1e-9
+    )
 
 
 def test_cycle_throughput_exponent_is_their_square_root() -> None:
@@ -79,18 +91,38 @@ def test_c_rate_term_is_zero_because_the_study_cannot_support_one() -> None:
     assert DEFAULT_NMC_PARAMETERS.cycle_c_rate_coefficient == 1.0
 
 
-def test_calendar_soc_shape_is_still_the_unattributed_surrogate() -> None:
-    """Schmalstieg parameterises calendar ageing on VOLTAGE, linearly.
+def test_calendar_is_now_in_voltage_space_as_published() -> None:
+    """Eq. (14) is linear in cell voltage; the SOC polynomial is unused."""
+    assert PARAMS.calendar_voltage_scale > 0.0
+    assert PARAMS.calendar_voltage_slope == 7.543
+    assert PARAMS.calendar_voltage_intercept == -23.75
+    assert PARAMS.ocv_curve == SANYO_UR18650E_OCV
+    assert (PARAMS.calendar_a0, PARAMS.calendar_a1, PARAMS.calendar_a2) == (0.0, 0.0, 0.0)
 
-    Converting to state of charge needs the OCV curve of their Fig. 1,
-    which the paper plots but does not tabulate.  Until it is digitised
-    the hinge shape stays, and stays unattributed; this test records that
-    so nobody later reads the parameter-set name as covering it.
+
+def test_ocv_curve_hits_both_voltages_the_paper_states() -> None:
+    """3.699 V at 50% SOC and 4.162 V at 100%, from their Section 3."""
+    assert interpolate_ocv(0.50) == pytest.approx(3.699, abs=0.005)
+    assert interpolate_ocv(1.00) == pytest.approx(4.162, abs=0.005)
+
+
+def test_ocv_curve_is_strictly_increasing_and_clears_the_zero_crossing() -> None:
+    """a_cap goes negative below V = 23.75/7.543 = 3.1486 V.
+
+    The curve bottoms out at 3.3346 V, so the whole 0-100% range is
+    usable with no floor.  A re-digitisation that dipped under the
+    crossing would make calendar ageing negative, so it is asserted.
     """
-    assert PARAMS.calendar_a0 == DEFAULT_NMC_PARAMETERS.calendar_a0
-    assert PARAMS.calendar_a1 == DEFAULT_NMC_PARAMETERS.calendar_a1
-    assert PARAMS.calendar_a2 == DEFAULT_NMC_PARAMETERS.calendar_a2
-    assert PARAMS.calendar_soc_knee == DEFAULT_NMC_PARAMETERS.calendar_soc_knee
+    voltages = [v for _, v in SANYO_UR18650E_OCV]
+    assert all(b > a for a, b in pairwise(voltages))
+    assert min(voltages) > 23.75 / 7.543
+
+
+def test_reproduces_equation_fourteen_at_the_reference_point() -> None:
+    """One year at 25 C and 50% SOC, against Eq. (14) evaluated directly."""
+    theirs = (7.543 * 3.699 - 23.75) * 1e6 * exp(-6976.0 / 298.15) * 365 ** 0.75
+    ours = calendar_soc_stress(0.50, PARAMS) / 0.75   # integral of g t^(a-1), a = 0.75
+    assert ours == pytest.approx(theirs, rel=0.005)
 
 
 def test_shipped_default_is_untouched() -> None:

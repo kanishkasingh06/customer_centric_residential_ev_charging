@@ -22,6 +22,7 @@ from numbers import Real
 
 from .exceptions import PhysicalConstraintError, SchemaValidationError
 from .menu import GeneratedMenu, MenuCandidate
+from .ocv import SANYO_UR18650E_OCV, interpolate_ocv
 from .schemas import (
     ChargingSession,
     Chemistry,
@@ -220,6 +221,25 @@ class ChemistryDegradationParameters:
     #: fitted activation energy is only meaningful against the reference
     #: the authors fitted it at.
     calendar_reference_temperature_c: float | None = None
+    #: Voltage-space calendar form, used when ``calendar_voltage_scale``
+    #: is positive: ``g(s) = scale * (slope * V(s) + intercept)`` with
+    #: ``V`` read off ``ocv_curve``.  This replaces the SOC polynomial
+    #: entirely rather than adding to it, because a model fitted on
+    #: voltage and one fitted on state of charge are alternatives, not
+    #: components.
+    calendar_voltage_scale: float = 0.0
+    calendar_voltage_slope: float = 0.0
+    calendar_voltage_intercept: float = 0.0
+    ocv_curve: tuple[tuple[int, float], ...] = ()
+    #: Mean-voltage cycle term, ``k * (Vbar - centre)^2``, added to the
+    #: cycle coefficient.  Schmalstieg et al. (2014) Eq. (20) carries one
+    #: and it is not small: cycling about 4.0 V rather than 3.667 V
+    #: doubles their coefficient.
+    cycle_mean_voltage_coefficient: float = 0.0
+    cycle_mean_voltage_center: float = 0.0
+    #: When true the depth term is ADDITIVE, ``c_ref + c_D_abs * delta``,
+    #: matching Eq. (20); otherwise multiplicative as before.
+    cycle_depth_is_additive: bool = False
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -235,6 +255,11 @@ class ChemistryDegradationParameters:
             ("cycle_time_exponent", self.cycle_time_exponent),
             ("calendar_cubic_coefficient", self.calendar_cubic_coefficient),
             ("calendar_cubic_center", self.calendar_cubic_center),
+            ("calendar_voltage_scale", self.calendar_voltage_scale),
+            ("calendar_voltage_slope", self.calendar_voltage_slope),
+            ("calendar_voltage_intercept", self.calendar_voltage_intercept),
+            ("cycle_mean_voltage_coefficient", self.cycle_mean_voltage_coefficient),
+            ("cycle_mean_voltage_center", self.cycle_mean_voltage_center),
         ):
             _finite(name, value)
         if self.calendar_reference_temperature_c is not None:
@@ -383,14 +408,21 @@ NAUMANN_LFP_2018_PARAMETERS = ChemistryDegradationParameters(
 #:     one or both directions.  c_ref follows from matching cumulative fade
 #:     per equivalent full cycle for their 2.05 Ah cell.
 #:
+#:   Calendar in VOLTAGE space, as published.  Their Eq. (14) is linear in
+#:     cell voltage, and Fig. 1 (digitised, see evmenu.ocv) supplies V(s).
+#:     Converting their per-day cumulative form to the per-year incremental
+#:     form used here:
+#:         g(s) = 0.75 * 365^0.75 * 1e6 * exp(-6976/T_ref) * (7.543 V(s) - 23.75)
+#:              = 0.004318413681008761 * (7.543 V(s) - 23.75)
+#:     One year at 25 C and 50% SOC gives 2.395% against the 2.390% their
+#:     Eq. (14) gives directly; the 0.2% gap is OCV digitisation.
+#:   Cycle depth ADDITIVE, with their mean-voltage term.  Eq. (20) is
+#:     b_cap = 7.348e-3 (Vbar - 3.667)^2 + 7.600e-4 + 4.081e-3 dDOD, applied
+#:     to sqrt(charge throughput in Ah).  Matching cumulative fade per
+#:     equivalent full cycle for their 2.05 Ah cell scales every term by
+#:     sqrt(2 * 2.05)/2 = 1.0124228365658292.
+#:
 #: NOT FROM THE PAPER, and not to be attributed to it
-#:   The calendar SOC shape.  Schmalstieg parameterises calendar ageing on
-#:     cell VOLTAGE, linearly.  Converting to the state-of-charge form used
-#:     here needs the cell's OCV curve, which their Fig. 1 plots but does not
-#:     tabulate; only two points are given in the text (3.699 V at 50% SOC,
-#:     4.162 V at 100%).  The hinge coefficients below are therefore the
-#:     previous surrogate, retained unchanged and still unattributed.
-#:     Digitising Fig. 1 would close this.
 #:   The C-rate factor.  Every cycle test was run at 1C and 35 C, so the
 #:     study contains no C-rate and no cycle-temperature dependence.
 #:     c_C is set to zero rather than invented; treat it as a sensitivity
@@ -403,15 +435,23 @@ NAUMANN_LFP_2018_PARAMETERS = ChemistryDegradationParameters(
 #:     than 3.667 V doubles b_cap.  Omitting it understates cycling at high
 #:     mean state of charge, which is exactly where V2G operates.
 SCHMALSTIEG_NMC_2014_PARAMETERS = ChemistryDegradationParameters(
-    calendar_a0=DEFAULT_NMC_PARAMETERS.calendar_a0,
-    calendar_a1=DEFAULT_NMC_PARAMETERS.calendar_a1,
-    calendar_a2=DEFAULT_NMC_PARAMETERS.calendar_a2,
-    calendar_soc_knee=DEFAULT_NMC_PARAMETERS.calendar_soc_knee,
+    # the SOC polynomial is unused: the voltage form below replaces it
+    calendar_a0=0.0,
+    calendar_a1=0.0,
+    calendar_a2=0.0,
+    calendar_soc_knee=0.0,
+    calendar_voltage_scale=0.004318413681008761,
+    calendar_voltage_slope=7.543,
+    calendar_voltage_intercept=-23.75,
+    ocv_curve=SANYO_UR18650E_OCV,
     calendar_time_exponent=0.75,
     activation_energy_j_per_mol=58001.691223168,
     calendar_reference_temperature_c=25.0,
-    cycle_reference_coefficient=7.694e-4,
-    cycle_dod_coefficient=5.3697,
+    cycle_reference_coefficient=0.0007694413557900302,
+    cycle_dod_coefficient=0.0041316975960251495,
+    cycle_depth_is_additive=True,
+    cycle_mean_voltage_coefficient=0.007439283003085714,
+    cycle_mean_voltage_center=3.667,
     cycle_c_rate_coefficient=0.0,
     cycle_time_exponent=0.50,
 )
@@ -849,6 +889,23 @@ def calendar_soc_stress(
     value = _finite("soc", soc)
     if not 0.0 <= value <= 1.0:
         raise PhysicalConstraintError("soc must lie in [0, 1].")
+    if (
+        isinstance(parameters, ChemistryDegradationParameters)
+        and parameters.calendar_voltage_scale > 0.0
+    ):
+        voltage = interpolate_ocv(
+            _finite("soc", soc), parameters.ocv_curve or SANYO_UR18650E_OCV
+        )
+        stress = parameters.calendar_voltage_scale * (
+            parameters.calendar_voltage_slope * voltage
+            + parameters.calendar_voltage_intercept
+        )
+        if stress < 0.0:
+            raise PhysicalConstraintError(
+                "voltage-form calendar stress went negative; the OCV curve "
+                "dips below the linear term's zero crossing."
+            )
+        return stress
     hinge = max(value - knee, 0.0)
     cubic = 0.0
     if isinstance(parameters, ChemistryDegradationParameters):

@@ -30,6 +30,7 @@ from evmenu.degradation import (
     calendar_soc_stress,
     cycle_age_slope,
 )
+from evmenu.ocv import SANYO_UR18650E_OCV, interpolate_ocv
 from evmenu.schemas import ChargingSession, EVSpec, PlanningSignal
 
 #: One equivalent full cycle is 2 * B_max of battery-side throughput, so a
@@ -202,11 +203,21 @@ def cycle_fade(
     phi: float,
     delta: float,
     chat: float,
+    mean_soc: float | None = None,
 ) -> float:
     """Cycle fade, eq. (54).
 
-    Identical in form to ``evmenu.degradation``; the depth factor takes the
-    SOC excursion ``delta`` where the unidirectional model takes ``phi``.
+    The depth factor takes the SOC excursion ``delta`` where the
+    unidirectional model takes ``phi``.
+
+    Two shapes are supported.  The default is the multiplicative
+    ``c_ref (1 + c_D delta)``.  A parameter set may instead declare
+    ``cycle_depth_is_additive``, giving ``c_ref + c_D delta`` plus an
+    optional mean-voltage term ``k (Vbar - centre)^2`` read off the OCV
+    curve, which is the form Schmalstieg et al. (2014) Eq. (20) fits.
+    The mean-voltage term penalises cycling about a high state of
+    charge, which is exactly where V2G operates, so omitting it
+    understates bidirectional cycling.
     """
     params = settings.parameters_for(ev.chemistry)
     slope = cycle_age_slope(
@@ -214,13 +225,21 @@ def cycle_fade(
         throughput_exponent=params.cycle_time_exponent,
         minimum_fec=settings.minimum_effective_fec,
     )
-    return (
-        params.cycle_reference_coefficient
-        * (1.0 + params.cycle_dod_coefficient * delta)
-        * (1.0 + params.cycle_c_rate_coefficient * chat)
-        * slope
-        * phi
-    )
+    if params.cycle_depth_is_additive:
+        coefficient = (
+            params.cycle_reference_coefficient + params.cycle_dod_coefficient * delta
+        )
+        if params.cycle_mean_voltage_coefficient > 0.0 and mean_soc is not None:
+            mean_voltage = interpolate_ocv(
+                min(1.0, max(0.0, mean_soc)), params.ocv_curve or SANYO_UR18650E_OCV
+            )
+            offset = mean_voltage - params.cycle_mean_voltage_center
+            coefficient += params.cycle_mean_voltage_coefficient * offset * offset
+    else:
+        coefficient = params.cycle_reference_coefficient * (
+            1.0 + params.cycle_dod_coefficient * delta
+        )
+    return coefficient * (1.0 + params.cycle_c_rate_coefficient * chat) * slope * phi
 
 
 def assess_trajectory(
@@ -263,7 +282,10 @@ def assess_trajectory(
         terminal_energy_kwh=terminal_energy_kwh,
         settings=settings,
     )
-    cycle = cycle_fade(ev=ev, settings=settings, phi=phi, delta=delta, chat=chat)
+    mean_soc = sum(soc) / len(soc) if soc else None
+    cycle = cycle_fade(
+        ev=ev, settings=settings, phi=phi, delta=delta, chat=chat, mean_soc=mean_soc
+    )
     return BidirectionalFade(
         calendar_window=window,
         calendar_parked=parked,
