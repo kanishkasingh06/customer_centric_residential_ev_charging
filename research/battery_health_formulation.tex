@@ -11,6 +11,8 @@
 \DeclareSIUnit{\rupee}{Rs}
 \DeclareSIUnit{\USD}{\$}
 \DeclareSIUnit{\yr}{yr}
+\DeclareSIUnit{\euro}{EUR}
+\DeclareSIUnit{\eurocent}{ct}
 
 \newtheorem{proposition}{Proposition}
 
@@ -603,16 +605,53 @@ compare \emph{offer rankings} rather than absolute fade.
 Collected here rather than scattered, in rough order of how much they
 could move a result.
 
-\paragraph{1. The pack price is the wrong kind of price.}
-$\pi_{\mathrm{chem}}$ is an OEM procurement price for new capacity.
-What a customer loses to marginal fade is not that: retail replacement
-carries labour, margin and tax; capacity is realised in money only at
-replacement or resale, not in arbitrarily small increments; and a pack
-inside an \num{8}-year warranty costs its owner little or nothing at
-the margin. The honest range therefore spans near-zero to several
-multiples of $\pi$, which is wider than a central estimate can survive.
-The documented $\pm\SI{25}{\percent}$ band understates it. This is the
-largest single uncertainty in any monetary figure here.
+\paragraph{1. The costing convention undercharges, and the price
+behind it is the wrong kind of price.}
+Two separable problems.
+
+\emph{Convention.} Equation~\eqref{eq:wear} prices the \emph{fraction
+of capacity lost}. The V2G optimisation literature instead writes the
+\emph{whole pack off} over the throughput it survives: Preis and
+Biedenbach~\cite{preis2023} review the field and find two usable
+forms, a weighted Ah-throughput model with a constant cost factor
+$\mathrm{CF} = \pi B^{\max} / E^{\mathrm{EoL}}$ and a performance-based
+piecewise model, with end of life at \SI{20}{\percent} capacity loss.
+At equal fade the two conventions differ by exactly that threshold:
+\eqref{eq:wear} charges \num{0.2} of what the throughput form charges,
+because reaching end of life costs the owner a pack, not a fifth of
+one. On that axis this formulation \emph{under}charges fivefold.
+
+\emph{Price.} $\pi_{\mathrm{chem}}$ is an OEM procurement price for new
+capacity with no end-of-life divisor in it. What an owner loses is
+retail replacement, which carries labour, margin and tax; or
+resale-value loss, since capacity is realised in money only at
+replacement or sale and not in arbitrarily small increments; or, inside
+an \num{8}-year warranty, close to nothing at the margin.
+Hein et al.~\cite{hein2012} model the residual value of used EV packs
+endogenously and obtain roughly \SI{18}{\euro\per\kilo\watt\hour},
+an order of magnitude under new-capacity price.
+
+\emph{Net effect, measured.} For the highest-saving offer of the worked
+menu (\SI{53.7}{\kilo\watt\hour} battery-side throughput), this
+formulation gives \SI{1.57}{\rupee\per\kilo\watt\hour} of throughput
+against the \SIrange{0.24}{0.47}{\rupee\per\kilo\watt\hour} implied by
+\cite{preis2023}'s published \SIrange{0.23}{0.45}{\eurocent\per\kilo\watt\hour}.
+So the two errors run opposite ways and do not cancel: the convention
+is fivefold low, while the fade model is fast enough to more than
+offset it --- its cycle term implies end of life at about \num{1500}
+equivalent full cycles, which is pessimistic for NMC. The figures here
+land three to six times above the published band.
+
+\emph{What would fix it.} Restate $W$ as
+$\mathrm{CF}\cdot Q$ with $\mathrm{CF}$ derived through an explicit
+end-of-life divisor, and calibrate against~\cite{preis2023} rather than
+against a pack price alone. Their methodological finding also bears on
+the choice: the constant-factor form is the better optimisation
+formulation, because the state-of-health-dependent piecewise model
+moves average degradation cost \emph{by a factor of \num{9.71}} when
+initial SoH shifts from \SI{95}{\percent} to \SI{100}{\percent}. This
+formulation already uses a constant factor, which is the right side of
+that result.
 
 \paragraph{2. Shallow-cycle fade is substantially \emph{reversible},
 and V2G sits in exactly that region.}
@@ -701,7 +740,13 @@ power-law form, so this is an inconsistency rather than a choice.
 
 \paragraph{8. $\delta$ is unvalidated as a depth measure.}
 Rainflow comparison is outstanding and should compare offer
-\emph{rankings}, not absolute fade.
+\emph{rankings}, not absolute fade. Li et al.~\cite{li2020} apply
+rainflow cycle counting inside a V2G scheduling optimisation at a
+\SI{15}{\minute} control interval, on the argument that conventional
+fade models resolve days or weeks where V2G scheduling needs minutes
+to hours, which is a usable precedent for the protocol. Their
+degradation objective is a bare cycle count with no fade model and no
+cost, so nothing is calibrated from it.
 
 \paragraph{9. The OCV curve is digitised, and single-cell.}
 Two points required a \SI{0.1}{\milli\volt} monotonicity repair. More
@@ -723,6 +768,27 @@ M.~Naumann, M.~Schimpe, P.~Keil, H.~C. Hesse, A.~Jossen,
 LiFePO$_4$/graphite cell,''
 \emph{Journal of Energy Storage}, vol.~17, pp.~153--169, 2018.
 doi:10.1016/j.est.2018.01.019
+
+\bibitem{preis2023}
+V.~Preis, F.~Biedenbach,
+``Assessing the incorporation of battery degradation in
+vehicle-to-grid optimization models,''
+\emph{Energy Informatics}, vol.~6, Suppl.~1, art.~33, 2023.
+doi:10.1186/s42162-023-00288-x
+
+\bibitem{hein2012}
+R.~Hein, P.~R. Kleindorfer, S.~Spinler,
+``Valuation of electric vehicle batteries in vehicle-to-grid and
+battery-to-grid systems,''
+\emph{Technological Forecasting \& Social Change}, vol.~79,
+pp.~1654--1671, 2012. doi:10.1016/j.techfore.2012.06.002
+
+\bibitem{li2020}
+S.~Li, J.~Li, C.~Su, Q.~Yang,
+``Optimization of bi-directional V2G behavior with active battery
+anti-aging scheduling,''
+\emph{IEEE Access}, vol.~8, pp.~11186--11196, 2020.
+doi:10.1109/ACCESS.2020.2964699
 
 \bibitem{naumann2020}
 M.~Naumann, F.~B. Spingler, A.~Jossen,
