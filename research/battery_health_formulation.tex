@@ -210,8 +210,8 @@ $N=0$. Then
 \Gamma =
 \begin{cases}
 c_{\mathrm{ref}}\bigl(1 + c_D \delta\bigr) & \text{multiplicative,}\\[2pt]
-c_{\mathrm{ref}} + c_D \delta + c_V\bigl(\bar{V} - V_c\bigr)^{2}
-  & \text{additive,}
+c_{\mathrm{ref}} + c_D \delta + c_{D3}\bigl(\delta - \delta_c\bigr)^{3}
+  + c_V\bigl(\bar{V} - V_c\bigr)^{2} & \text{additive,}
 \end{cases}
 \label{eq:cyc}
 \end{equation}
@@ -543,12 +543,30 @@ fatigue crack growth ($m = 2.2$). None of it is used here; it is kept
 in the bibliography only because its Part~1 companion is the likely
 origin of the superseded activation energy.
 
-\paragraph{Cycle fade, LFP.}
-Naumann et al.~\cite{naumann2018} is calendar-only; the authors state
-the companion cycle study is unpublished. The LFP cycle coefficients
-are therefore a structural assumption of this work, with $c_D = c_C = 1$
-and the multiplicative branch, and are swept in sensitivity rather than
-cited.
+\paragraph{LFP cycle: Naumann et al.\ (2020), reproduced.}
+The companion cycle study~\cite{naumann2020} has since appeared: same
+Sony/Murata cell, 19 test points over 885 days. Its Eq.~(5),
+$Q^{\mathrm{cyc}}_{\mathrm{loss}} = k_T k_{C} k_{\mathrm{DOC}}
+\mathrm{FEC}^{0.5}$, supplies every LFP cycle coefficient here. The
+C-rate factor of their Eq.~(8), $k_C = 0.0630\,C + 0.0971$, normalised
+on its intercept gives $c_C = \num{0.648816}$ --- the coefficient that
+had no empirical support anywhere before this paper, and which the NMC
+branch still lacks because Schmalstieg et al.\ ran every cycle test at
+1C. The depth factor of their Eq.~(10) is \emph{cubic} in depth of
+cycle centred on \num{0.6}, not linear, which is why \eqref{eq:cyc}
+carries a $c_{D3}$ term. Both depth terms scale by $0.0971/200$ to give
+fade per equivalent full cycle. Their Section~3.2.1 reports the
+temperature influence on pure cycle ageing between \SI{25}{\celsius}
+and \SI{40}{\celsius} as negligible, so their model carries no cycle
+temperature term and neither does this one.
+
+One caveat travels with it, and it is the authors'\ own. Test points
+below \SI{80}{\percent} depth showed unsteady, partly reversible
+capacity loss whose mechanism they state is not understood, so
+$k_{\mathrm{DOC}}$ was fitted on the \SI{80}{\percent} and
+\SI{100}{\percent} points alone. Shallow cycling is therefore the
+least trustworthy region of this parameterisation, and V2G arbitrage
+sits squarely in it.
 
 \paragraph{Temperature.}
 Equation~\eqref{eq:arrhenius} propagates strongly. Pack temperature is
@@ -595,22 +613,29 @@ multiples of $\pi$, which is wider than a central estimate can survive.
 The documented $\pm\SI{25}{\percent}$ band understates it. This is the
 largest single uncertainty in any monetary figure here.
 
-\paragraph{2. The C-rate coefficient has no empirical support at all.}
-Schmalstieg et al.\ ran every cycle test at 1C and \SI{35}{\celsius};
-Naumann et al.\ has no cycle model. $c_C$ is set to zero and
-$\lambda_d$ exposed as a sensitivity parameter. Neither is calibrated,
-and no study located so far would calibrate them.
+\paragraph{2. Shallow-cycle fade is the least trustworthy region, and
+V2G sits in it.}
+Naumann et al.~\cite{naumann2020} report unsteady, partly reversible
+capacity loss below \SI{80}{\percent} depth of cycle, with the
+mechanism unexplained, and fit their depth factor on the
+\SI{80}{\percent} and \SI{100}{\percent} points only. Arbitrage
+cycling is shallow by nature, so the V2G offers on a menu are priced in
+the region the source study is least confident about.
 
-\paragraph{3. LFP cycle ageing is unattributed.}
-See Section~\ref{sec:provenance}. A published LFP cycle study would
-close it; the companion to~\cite{naumann2018} is the obvious candidate
-if it has since appeared.
+\paragraph{3. The NMC C-rate coefficient still has no support.}
+Schmalstieg et al.\ ran every cycle test at 1C and \SI{35}{\celsius},
+so $c_C = 0$ for NMC and $\lambda_d$ stays a swept sensitivity
+parameter. LFP is now sourced from~\cite{naumann2020}; NMC is not, and
+the two chemistries therefore differ in whether this term exists at
+all.
 
-\paragraph{4. The additive and multiplicative depth forms disagree
-away from the fitted baseline.}
-NMC now uses the additive branch as published. LFP still uses the
-multiplicative one, so the two chemistries do not share a functional
-form, and comparisons between them carry that difference.
+\paragraph{4. The two chemistries no longer share a functional form.}
+Both now use the additive branch, but LFP's depth term is cubic in
+$\delta$ centred on \num{0.6} while NMC's is linear, LFP's calendar
+term is a cubic in state of charge while NMC's is linear in voltage,
+and only NMC carries a mean-voltage cycle term. Each follows its own
+source faithfully; cross-chemistry comparisons carry all four
+differences.
 
 \paragraph{5. No multi-day coupling.}
 $N$ is a scenario input, never advanced between sessions. Benign where
@@ -652,6 +677,13 @@ M.~Naumann, M.~Schimpe, P.~Keil, H.~C. Hesse, A.~Jossen,
 LiFePO$_4$/graphite cell,''
 \emph{Journal of Energy Storage}, vol.~17, pp.~153--169, 2018.
 doi:10.1016/j.est.2018.01.019
+
+\bibitem{naumann2020}
+M.~Naumann, F.~B. Spingler, A.~Jossen,
+``Analysis and modeling of cycle aging of a commercial
+LiFePO$_4$/graphite cell,''
+\emph{Journal of Power Sources}, vol.~451, 227666, 2020.
+doi:10.1016/j.jpowsour.2019.227666
 
 \bibitem{wang2014}
 J.~Wang, J.~Purewal, P.~Liu, J.~Hicks-Garner, S.~Soukazian, E.~Sherman,

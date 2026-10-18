@@ -229,6 +229,9 @@ def cycle_fade(
         coefficient = (
             params.cycle_reference_coefficient + params.cycle_dod_coefficient * delta
         )
+        if params.cycle_depth_cubic_coefficient != 0.0:
+            offset = delta - params.cycle_depth_cubic_center
+            coefficient += params.cycle_depth_cubic_coefficient * offset ** 3
         if params.cycle_mean_voltage_coefficient > 0.0 and mean_soc is not None:
             mean_voltage = interpolate_ocv(
                 min(1.0, max(0.0, mean_soc)), params.ocv_curve or SANYO_UR18650E_OCV

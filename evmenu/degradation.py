@@ -240,6 +240,12 @@ class ChemistryDegradationParameters:
     #: When true the depth term is ADDITIVE, ``c_ref + c_D_abs * delta``,
     #: matching Eq. (20); otherwise multiplicative as before.
     cycle_depth_is_additive: bool = False
+    #: Cubic depth term, ``k * (delta - centre)^3``, added to the cycle
+    #: coefficient in the additive branch.  Naumann et al. (2020) fit LFP
+    #: cycle ageing with a cubic in depth of cycle rather than a linear
+    #: term; see NAUMANN_LFP_2020_CYCLE_PARAMETERS.
+    cycle_depth_cubic_coefficient: float = 0.0
+    cycle_depth_cubic_center: float = 0.0
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -260,6 +266,8 @@ class ChemistryDegradationParameters:
             ("calendar_voltage_intercept", self.calendar_voltage_intercept),
             ("cycle_mean_voltage_coefficient", self.cycle_mean_voltage_coefficient),
             ("cycle_mean_voltage_center", self.cycle_mean_voltage_center),
+            ("cycle_depth_cubic_coefficient", self.cycle_depth_cubic_coefficient),
+            ("cycle_depth_cubic_center", self.cycle_depth_cubic_center),
         ):
             _finite(name, value)
         if self.calendar_reference_temperature_c is not None:
@@ -453,6 +461,56 @@ SCHMALSTIEG_NMC_2014_PARAMETERS = ChemistryDegradationParameters(
     cycle_mean_voltage_coefficient=0.007439283003085714,
     cycle_mean_voltage_center=3.667,
     cycle_c_rate_coefficient=0.0,
+    cycle_time_exponent=0.50,
+)
+
+#: LFP cycle ageing from Naumann, Spingler and Jossen (2020), "Analysis
+#: and modeling of cycle aging of a commercial LiFePO4/graphite cell",
+#: J. Power Sources 451, 227666, doi:10.1016/j.jpowsour.2019.227666 --
+#: the companion cycle study to the calendar paper above, same Sony/
+#: Murata US26650FTC1 cell, 19 test points over 885 days.  Combined with
+#: NAUMANN_LFP_2018_PARAMETERS this makes the LFP branch a reproduction
+#: end to end.
+#:
+#: Their Eq. (5):  Qloss_cyc[%] = k_T * k_Crate * k_DOC * FEC^z, z = 0.5.
+#:   Eq. (8), Table 6:  k_Crate = 0.0630 * C + 0.0971
+#:   Eq. (10), Table 6: k_DOC   = 4.0253 (DOC - 0.6)^3 + 1.0923
+#:   k_T = 1: Section 3.2.1 states the temperature influence on PURE
+#:   cycle ageing between 25 and 40 C was negligible, so their model
+#:   carries no cycle temperature term.  Neither does this one.
+#:
+#: Two consequences for what was previously unattributable.  The C-rate
+#: coefficient is now sourced: normalising k_Crate on its intercept gives
+#: c_C = 0.0630/0.0971 = 0.6488156539649845, where the NMC branch still has
+#: none.  And the depth term is CUBIC in depth of cycle centred on 0.6,
+#: not linear -- their Fig. 7a shows the fitted factor flattening through
+#: the mid range and rising at both ends.
+#:
+#: Converting Eq. (5) to fade per equivalent full cycle in the additive
+#: branch used here, Gamma * 2 = k_Crate * k_DOC / 100 at C = 0, scales
+#: both depth terms by 0.0971/200.
+#:
+#: Caveat the authors state: test points below 80% depth showed unsteady,
+#: partly reversible capacity loss that the model does not represent, so
+#: k_DOC was fitted on the 80% and 100% points only.  Shallow-cycle fade
+#: is the least trustworthy region of this parameterisation, and V2G
+#: arbitrage sits in it.
+NAUMANN_LFP_2020_CYCLE_PARAMETERS = ChemistryDegradationParameters(
+    calendar_a0=NAUMANN_LFP_2018_PARAMETERS.calendar_a0,
+    calendar_a1=NAUMANN_LFP_2018_PARAMETERS.calendar_a1,
+    calendar_a2=NAUMANN_LFP_2018_PARAMETERS.calendar_a2,
+    calendar_soc_knee=NAUMANN_LFP_2018_PARAMETERS.calendar_soc_knee,
+    calendar_cubic_coefficient=NAUMANN_LFP_2018_PARAMETERS.calendar_cubic_coefficient,
+    calendar_cubic_center=NAUMANN_LFP_2018_PARAMETERS.calendar_cubic_center,
+    calendar_time_exponent=NAUMANN_LFP_2018_PARAMETERS.calendar_time_exponent,
+    activation_energy_j_per_mol=NAUMANN_LFP_2018_PARAMETERS.activation_energy_j_per_mol,
+    calendar_reference_temperature_c=25.0,
+    cycle_reference_coefficient=0.0005303116500000001,
+    cycle_dod_coefficient=0.0,
+    cycle_depth_cubic_coefficient=0.00195428315,
+    cycle_depth_cubic_center=0.6,
+    cycle_depth_is_additive=True,
+    cycle_c_rate_coefficient=0.6488156539649845,
     cycle_time_exponent=0.50,
 )
 
