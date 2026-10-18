@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from math import ceil
 
 from evmenu.degradation import DegradationSettings
+from evmenu.exceptions import PhysicalConstraintError
 from evmenu.schemas import ChargingSession, EVSpec, PlanningSignal
 
 from .envelope import V2GEnvelope
@@ -106,9 +107,25 @@ def candidate_targets(
     ev: EVSpec,
     session: ChargingSession,
     reserve_soc: float,
-    standard: tuple[float, ...] = (0.8, 1.0),
+    standard: tuple[float, ...] | None = (0.8, 1.0),
+    tier_count: int | None = None,
 ) -> list[float]:
-    """The trip-aware service minimum, plus the standard tiers above it."""
+    """Service minimum plus tiers above it.
+
+    Two ways to pick the tiers.  ``standard`` names them absolutely, which
+    is what 0.8 and 1.0 have always been.  ``tier_count`` instead spaces
+    ``K`` tiers uniformly from the floor to full, mirroring the
+    ``k/K * S^max`` convention the formulation already froze for saving
+    levels, and takes precedence when given.
+
+    The floor is ``max(service minimum, arrival SOC)``, not the service
+    minimum alone.  A target beneath what the car arrived holding is not
+    a service level -- terminal energy is ``max(arrival, target)``, so
+    every such tier collapses onto the same "decline to charge"
+    trajectory.  Absolute tiers hit this constantly: a car plugged in at
+    65% has nothing between there and 0.8, so the health end of its menu
+    is one row.
+    """
     minimum = service_minimum_soc(
         ev=ev, session=session, reserve_soc=reserve_soc
     )
@@ -117,9 +134,18 @@ def candidate_targets(
     # it was derived from.
     quantised = min(1.0, ceil(minimum * 1e6) / 1e6)
     targets = {quantised}
-    for value in standard:
-        if value >= minimum - 1e-9:
-            targets.add(round(value, 6))
+    arrival = session.initial_energy_kwh / ev.battery_capacity_kwh
+    floor = min(1.0, max(quantised, arrival))
+    if tier_count is not None:
+        if tier_count < 1:
+            raise PhysicalConstraintError("tier_count must be at least 1.")
+        span = 1.0 - floor
+        for k in range(tier_count + 1):
+            targets.add(round(min(1.0, floor + span * k / tier_count), 6))
+    else:
+        for value in standard or ():
+            if value >= floor - 1e-9:
+                targets.add(round(value, 6))
     return sorted(t for t in targets if 0.0 <= t <= 1.0)
 
 
@@ -181,12 +207,15 @@ def generate_offers(
     guard_weight: float = 0.0,
     restarts: int = 1,
     maximum_ready_steps: int = 4,
+    target_tiers: tuple[float, ...] | None = (0.8, 1.0),
+    target_tier_count: int | None = None,
 ) -> list[V2GOffer]:
     """Generate every feasible offer across the request space."""
     offers: list[V2GOffer] = []
     starts = signal.interval_start_minutes
     for target in candidate_targets(
-        ev=ev, session=session, reserve_soc=envelope.reserve_soc
+        ev=ev, session=session, reserve_soc=envelope.reserve_soc, standard=target_tiers,
+        tier_count=target_tier_count,
     ):
         probe = RequestContext(
             ev=ev,

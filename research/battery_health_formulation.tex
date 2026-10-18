@@ -1,0 +1,584 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{amsthm}
+\usepackage{siunitx}
+\usepackage[hidelinks]{hyperref}
+
+\sisetup{group-separator={,},group-minimum-digits=4}
+\DeclareSIUnit{\rupee}{Rs}
+\DeclareSIUnit{\USD}{\$}
+\DeclareSIUnit{\yr}{yr}
+
+\newtheorem{proposition}{Proposition}
+
+\newcommand{\Bmax}{B^{\max}}
+\newcommand{\dQ}{\Delta Q}
+\newcommand{\etain}{\eta^{\mathrm{in}}}
+\newcommand{\etaout}{\eta^{\mathrm{out}}}
+
+\title{Battery Health in the Customer Menu:\\
+Session Capacity Fade and its Monetary Equivalent}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This note states the battery-health component of the residential EV
+charging menu: the semi-empirical capacity-fade model evaluated for one
+connected session, its bidirectional (V2G) extension, and the mapping
+from fade to rupees that makes health commensurable with the electricity
+bill. Equations are numbered independently; where they correspond to the
+NPSC manuscript this is noted. Every numerical claim in
+Section~\ref{sec:verification} was re-derived from the parameter table
+alone and agrees with the implementation to \num{1.4e-20}. Parameter
+provenance and its limits are stated in Section~\ref{sec:provenance};
+these are literature-anchor calibrations, not fitted coefficients, and
+the monetary conversion rests on a single exogenous assumption.
+\end{abstract}
+
+\section{Session fade}
+
+Let a connected session span the interval set $\mathcal{T} =
+\{0,\dots,n-1\}$ with durations $\Delta t_k$ (hours), battery energies
+$E_k$ at the $n+1$ state boundaries, and state of charge $s_k = E_k /
+\Bmax$. Capacity fade over the session decomposes into three terms:
+%
+\begin{equation}
+\dQ \;=\; \dQ^{\mathrm{cal,win}} \;+\; \dQ^{\mathrm{cal,park}}
+       \;+\; \dQ^{\mathrm{cyc}} .
+\label{eq:total}
+\end{equation}
+%
+All three are dimensionless fractions of nominal usable capacity. This
+replaces the normalised $0$--$100$ health score $H$ of the manuscript;
+\eqref{eq:total} is a \emph{damage} measure, so the dominance direction
+reverses, $\dQ_a \le \dQ_b$ where the manuscript wrote $H_a \ge H_b$.
+
+\subsection{Calendar stress}
+
+Calendar ageing is driven by a function of the state of charge,
+%
+\begin{equation}
+g(s) \;=\; a_0 \;+\; a_1 s \;+\; a_2 \bigl(\max\{s - s^{\mathrm{knee}},\,0\}\bigr)^{2}
+          \;+\; a_3 \bigl(s - s_c\bigr)^{3},
+\label{eq:gstress}
+\end{equation}
+%
+in fractional capacity loss per year at the reference temperature and
+anchor age. Two shapes are admitted. A hinge at $s^{\mathrm{knee}}$
+encodes accelerated degradation above a threshold and is flat beneath
+it. A cubic centred on $s_c$ rises monotonically with a plateau at the
+centre. They are not interchangeable, and which one is used decides
+whether discharging a pack at moderate state of charge carries any
+calendar benefit.
+
+\paragraph{LFP.} The coefficients are those of Naumann et al.\
+(2018)~\cite{naumann2018}, converted to the differential form of
+Section~\ref{sec:parameters}. That study reports a cubic,
+$a_1 = a_2 = 0$ with $s_c = 0.5$, and calendar loss rising
+monotonically with state of charge by a factor of \num{3.915} from
+empty to full. An earlier version of this formulation used a hinge at
+$s^{\mathrm{knee}} = 0.70$ with $a_1 = 0$, which is flat below
+\SI{70}{\percent} and gives a full-to-empty spread of only
+\num{1.24}; it is not what the cited study measured and has been
+replaced.
+
+Two multiplicative factors move $g$ off its reference point. Temperature
+follows Arrhenius,
+%
+\begin{equation}
+\theta(T) \;=\; \exp\!\left[-\frac{E_a}{R}
+  \left(\frac{1}{T} - \frac{1}{T^{\mathrm{ref}}}\right)\right],
+\qquad T,\,T^{\mathrm{ref}} \text{ in kelvin},
+\label{eq:arrhenius}
+\end{equation}
+%
+with $R = \SI{8.314462618}{\joule\per\mole\per\kelvin}$. Ageing is a
+sublinear power law in calendar time, $Q \propto t^{\alpha}$ with
+$\alpha \in (0,1]$, so the \emph{local} rate at pack age $t$ relative to
+the anchor age $t_{0}$ is the ratio of derivatives,
+%
+\begin{equation}
+\psi(t) \;=\;
+  \frac{\alpha\, t^{\alpha-1}}{\alpha\, t_{0}^{\alpha-1}}
+  \;=\; \left(\frac{t}{t_{0}}\right)^{\alpha-1}.
+\label{eq:agefactor}
+\end{equation}
+%
+Since $\alpha < 1$, $\psi$ decreases with age: an older pack fades more
+slowly per unit time. The model is therefore incremental, charging each
+session the marginal rate at the pack's current age rather than an
+average, which is the correct treatment for a power law.
+
+The anchor age $t_{0}$ is a normalisation, not a physical quantity. It
+fixes the age at which $g(s)$ in \eqref{eq:gstress} is literally the
+fractional loss per year, so that $\psi(t_{0}) = 1$ by construction.
+Taking $t_{0} = \SI{1}{\yr}$ reduces \eqref{eq:agefactor} to
+$t^{\alpha-1}$ with $t$ in years and places the coefficients near the
+one-to-two-year span of the calendar-ageing campaigns they are drawn
+from; the singularity at $t\to 0$ rules out anchoring at zero.
+Consequently $t_{0}$ and $(a_0,a_1,a_2,a_3)$ are \emph{not} independent:
+re-anchoring to $t_0'$ requires scaling every $a_i$ by
+$(t_0'/t_{0})^{1-\alpha}$, failing which the model changes silently.
+For $t_0' = \SI{2}{\yr}$ that factor is \num{1.189} (NMC) and
+\num{1.414} (LFP).
+
+\subsection{Charging-window and parked-day calendar fade}
+
+Over the connected session, stress is accumulated at the left endpoint
+of each interval:
+%
+\begin{equation}
+\dQ^{\mathrm{cal,win}} \;=\; \theta(T)\,\psi(t)
+  \sum_{k=0}^{n-1} g\!\left(\min\{\max\{s_k,0\},1\}\right)
+  \frac{\Delta t_k}{H_{\mathrm{yr}}},
+  \qquad H_{\mathrm{yr}} = \num{8760}.
+\label{eq:calwin}
+\end{equation}
+%
+The remainder of the day is spent parked at the delivered state of
+charge, less the energy consumed by the trip $E^{\mathrm{trip}}$:
+%
+\begin{equation}
+s^{\mathrm{park}} \;=\;
+  \frac{\max\{\zeta,\,z\}\,\Bmax - E^{\mathrm{trip}}}{\Bmax},
+\qquad
+\dQ^{\mathrm{cal,park}} \;=\; g\!\left(s^{\mathrm{park}}\right)
+  \theta(T)\,\psi(t)\,\frac{H_{\mathrm{park}}}{H_{\mathrm{yr}}},
+\label{eq:calpark}
+\end{equation}
+%
+where $z$ is the requested target, $\zeta$ the declared departure floor,
+and $H_{\mathrm{park}}$ the parked hours. Because terminal energy is
+pinned by equality to $\max\{\zeta,z\}\Bmax$,
+\eqref{eq:calpark} is constant at fixed $(z,\zeta)$ and independent of
+the charging schedule. This is Proposition~1: the parked term is a
+constant of the request and may be excluded from the trajectory
+objective without changing its argument minimum.
+
+\subsection{Cycle fade}
+
+Cycle ageing is a power law in accumulated equivalent full cycles $N$,
+modulated by depth of discharge and rate. Its local slope is
+%
+\begin{equation}
+\sigma(N) \;=\; \beta \,\max\{N,\,N^{\min}\}^{\,\beta-1},
+\label{eq:cycslope}
+\end{equation}
+%
+with $N^{\min}>0$ a regularisation floor for the singular derivative at
+$N=0$. Then
+%
+\begin{equation}
+\dQ^{\mathrm{cyc}} \;=\; c_{\mathrm{ref}}
+  \bigl(1 + c_D\,\delta\bigr)
+  \bigl(1 + c_C\,\hat{C}\bigr)\,
+  \sigma(N)\;\varphi ,
+\label{eq:cyc}
+\end{equation}
+%
+where $\varphi$ is battery-side throughput as a fraction of capacity,
+$\delta$ the state-of-charge excursion, and $\hat{C}$ the peak C-rate.
+These three are where the bidirectional extension enters.
+
+\section{Bidirectional extension}
+\label{sec:v2g}
+
+Write $E^{\mathrm{in}}_k \ge 0$ and $E^{\mathrm{out}}_k \ge 0$ for grid
+import and export in interval $k$. Battery energy evolves as
+%
+\begin{equation}
+E_{k+1} \;=\; E_k \;+\; \etain E^{\mathrm{in}}_k
+  \;-\; \frac{E^{\mathrm{out}}_k}{\etaout}.
+\label{eq:state}
+\end{equation}
+%
+Throughput counts both directions on the battery side:
+%
+\begin{equation}
+\varphi \;=\; \frac{1}{\Bmax}
+  \left( \etain \sum_{k} E^{\mathrm{in}}_k
+       + \frac{1}{\etaout}\sum_{k} E^{\mathrm{out}}_k \right),
+\qquad
+\Delta N \;=\; \frac{\varphi}{2}.
+\label{eq:phi}
+\end{equation}
+%
+The equivalent-full-cycle convention in \eqref{eq:phi} is a definition,
+not an inheritance: one EFC is $2\Bmax$ of battery-side throughput, so a
+full charge followed by a full discharge advances $N$ by exactly one.
+
+Under charge-only operation the state of charge is monotone, and
+throughput coincides with the state-of-charge swing, so $\varphi$ serves
+as a depth proxy. Export breaks that, and depth must be stated
+explicitly:
+%
+\begin{equation}
+\delta \;=\; \max_{k} s_k \;-\; \min_{k} s_k .
+\label{eq:delta}
+\end{equation}
+%
+\begin{proposition}[backward compatibility]
+If $E^{\mathrm{out}}_k \equiv 0$ and no trip occurs within the session,
+then $\delta = \varphi$ exactly.
+\end{proposition}
+%
+\noindent
+Peak C-rate likewise takes the larger of the two directions:
+%
+\begin{equation}
+\hat{C} \;=\; \frac{1}{\Bmax} \max_{k}
+  \max\!\left\{
+    \frac{\etain E^{\mathrm{in}}_k}{\Delta t_k},\;
+    \lambda_d\,\frac{E^{\mathrm{out}}_k}{\etaout \Delta t_k}
+  \right\}.
+\label{eq:chat}
+\end{equation}
+%
+Here $\lambda_d$ is a discharge-rate severity multiplier. It has no
+anchor in the parameter sources used here, neither of which reports a
+discharge-side C-rate coefficient, and is therefore exposed as a
+sensitivity parameter rather than claimed as calibrated.
+
+Two structural consequences follow. First, $\varphi$ becomes a decision
+variable under export, so \eqref{eq:cyc} can no longer be treated as a
+constant of the request and must re-enter the trajectory objective.
+Second, $\bigl(1 + c_D\delta\bigr)\bigl(1 + c_C\hat{C}\bigr)\varphi$ is
+not convex, so convexity claims valid for the charge-only problem do not
+survive. A claim made in an earlier version of this formulation is
+\emph{withdrawn} here. It held that, because LFP calendar ageing was
+flat below the knee, export from beneath it carried no calendar
+benefit. That rested on the hinge form; under the cubic actually
+reported by Naumann et al.\ \cite{naumann2018}, $g$ is strictly
+increasing in $s$ everywhere, so lowering the state of charge does
+reduce calendar ageing at every operating point. The quantitative
+claim is modest --- moving a pack from \SI{65}{\percent} to
+\SI{45}{\percent} reduces $g$ by roughly a quarter --- and it is
+offset by the cycle fade the export itself incurs, so no headline
+claim that V2G improves battery health follows either way.
+
+\section{Monetary equivalent}
+\subsection{Pricing a session}
+
+The menu offers four attributes to a customer who must trade battery
+wear against the electricity bill. A normalised health index does not
+support that trade; a price does. Since $\dQ$ is the \emph{fraction} of
+usable capacity consumed, multiplying by capacity and pack cost gives
+rupees of battery spent:
+%
+\begin{equation}
+W \;=\; \dQ \,\cdot\, \Bmax \,\cdot\, \pi_{\mathrm{chem}},
+\label{eq:wear}
+\end{equation}
+%
+with $\pi_{\mathrm{chem}}$ the chemistry-specific pack cost in
+\si{\rupee\per\kilo\watt\hour}. Wear and bill are then in the same unit,
+and the only free quantity in the choice model is their ratio: how much
+of a rupee of consumed pack a customer treats as a rupee out of pocket.
+
+\subsection{What to display}
+
+Equation~\eqref{eq:wear} prices the whole session, which is the correct
+quantity for the choice model and the wrong one to put in front of a
+customer. The reason is that a large part of $W$ is incurred whichever
+offer is taken. The parked-day term \eqref{eq:calpark} depends only on
+the delivered state of charge and the trip, so it accrues even when the
+customer declines to charge altogether; in the worked example of
+Section~\ref{sec:verification} it is the largest of the three
+components, at \SI{43}{\percent} of total fade. A customer comparing two
+rows of a menu is choosing between them, not between charging and
+owning a battery, so the figure shown against an offer should be the
+wear its selection \emph{adds}.
+
+Let $\dQ_0$ be the smallest total fade among the offers of one menu. In
+practice the minimiser is the decline-to-charge option, so $\dQ_0$ is
+the fade the customer incurs by doing nothing. For an offer of fade
+$\dQ$ and saving $S$, define
+%
+\begin{equation}
+W^{\mathrm{marg}} \;=\; \bigl(\dQ - \dQ_0\bigr)\Bmax\,\pi_{\mathrm{chem}},
+\qquad
+\mathrm{Net} \;=\; S - W^{\mathrm{marg}}.
+\label{eq:net}
+\end{equation}
+%
+$W^{\mathrm{marg}}$ is the pack spend attributable to the decision and
+$\mathrm{Net}$ is what the offer is worth once that spend is paid for.
+Three properties of \eqref{eq:net} should travel with any figure
+computed from it.
+
+It is a presentation convention, not part of the model. The choice
+model uses absolute $W$ from \eqref{eq:wear}. Within one request the two
+differ by the constant $\dQ_0 \Bmax \pi_{\mathrm{chem}}$, which cancels
+in a logit and so leaves choice probabilities unchanged; across requests
+it does not cancel, and the two conventions must not be mixed.
+
+$\dQ_0$ is a property of the menu, not of the vehicle. Regenerate the
+menu with a different tier ladder and $\dQ_0$ moves, so
+$\mathrm{Net}$ ranks offers within one menu and is not comparable
+across menus or across sessions.
+
+$\mathrm{Net}$ can be negative, and this is the point of computing it.
+An offer whose saving is smaller than the pack it consumes destroys
+value; in the worked menu of Section~\ref{sec:verification} two of
+fifteen displayed offers are negative, which is not visible when the
+health column reports a raw fade fraction.
+
+\section{Parameters}
+\label{sec:parameters}
+
+\begin{table}[htbp]
+\centering
+\caption{Degradation parameters as implemented. LFP calendar
+coefficients are Naumann et al.\ (2018)~\cite{naumann2018} Table~7,
+converted to the per-year differential form by
+$g(s) = \tfrac{1}{2}\,(k_{\mathrm{ref}}/100)\sqrt{S}\;k_{\mathrm{SOC}}(s)$
+with $S = 8760 \times 3600$. Cycle coefficients for both chemistries,
+and all NMC calendar coefficients, are not drawn from either cited
+study; see Section~\ref{sec:provenance}. The upper block is
+chemistry-specific and immutable; the lower block holds scenario
+settings shared across chemistries, which is why no reference age or
+reference temperature appears in a per-chemistry coefficient listing.}
+\label{tab:params}
+\begin{tabular}{llrr}
+\toprule
+Symbol & Quantity & LFP & NMC \\
+\midrule
+$a_0$              & calendar intercept            & \num{0.021258} & \num{0.0073} \\
+$a_1$              & calendar linear term          & \num{0}      & \num{0.0210} \\
+$a_2$              & calendar hinge coefficient    & \num{0}      & \num{0.0475} \\
+$s^{\mathrm{knee}}$& calendar knee                 & ---          & \num{0.80}   \\
+$a_3$              & calendar cubic coefficient    & \num{0.100862} & \num{0} \\
+$s_c$              & cubic centre                  & \num{0.50}   & ---          \\
+$\alpha$           & calendar time exponent        & \num{0.50}   & \num{0.75}   \\
+$E_a$              & activation energy (\si{\joule\per\mole}) & \num{17126} & \num{24000} \\
+$T^{\mathrm{ref}}$ & calendar reference temperature & \SI{25}{\celsius} & \SI{30}{\celsius} \\
+$c_{\mathrm{ref}}$ & cycle reference coefficient   & \num{0.0007} & \num{0.0009} \\
+$c_D$              & depth-of-discharge coefficient& \num{1.00}   & \num{1.00}   \\
+$c_C$              & C-rate coefficient            & \num{1.00}   & \num{1.00}   \\
+$\beta$            & cycle throughput exponent     & \num{0.50}   & \num{0.50}   \\
+\midrule
+$t_{0}$ & calendar anchor age            & \multicolumn{2}{c}{\SI{1}{\yr}} \\
+$H_{\mathrm{park}}$& parked hours per day          & \multicolumn{2}{c}{\num{16}} \\
+$N^{\min}$         & cycle-slope regularisation    & \multicolumn{2}{c}{\num{1}} \\
+$\pi_{\mathrm{chem}}$ & pack cost (\si{\rupee\per\kilo\watt\hour}) & \num{7850} & \num{12400} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Worked example}
+\label{sec:verification}
+
+A \SI{78}{\kilo\watt\hour} NMC pack, three years old, \num{500}
+accumulated EFC, at \SI{25}{\celsius}; connected \num{20}:\num{00} to
+\num{07}:\num{00}, arriving at \SI{65}{\percent}. The factors are
+%
+\[
+\theta = \num{0.852415218}, \qquad
+\psi = 3^{-0.25} = \num{0.759835686}, \qquad
+\sigma(500) = 0.5 \cdot 500^{-0.5} = \num{0.022360680}.
+\]
+%
+For the highest-saving offer on the menu (target \SI{94}{\percent},
+$S = \SI{143.32}{\rupee}$):
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lrr}
+\toprule
+Component & Value & Share \\
+\midrule
+$\dQ^{\mathrm{cal,win}}$  & \num{1.695736e-5} & \SI{24.4}{\percent} \\
+$\dQ^{\mathrm{cal,park}}$ & \num{2.987358e-5} & \SI{43.0}{\percent} \\
+$\dQ^{\mathrm{cyc}}$      & \num{2.270323e-5} & \SI{32.7}{\percent} \\
+\midrule
+$\dQ$ (total)             & \num{6.953417e-5} & \SI{0.00695}{\percent} of pack \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+Applying \eqref{eq:wear} and \eqref{eq:net} with $\dQ_0 =
+\num{3.952973e-5}$:
+%
+\[
+W = \num{6.953417e-5}\cdot 78 \cdot \num{12400} = \SI{67.25}{\rupee},
+\qquad
+W^{\mathrm{marg}} = \SI{29.02}{\rupee},
+\qquad
+\mathrm{Net} = \SI{114.30}{\rupee}.
+\]
+
+\paragraph{Verification.}
+All \num{114} Pareto-efficient offers of this menu were re-derived from
+Table~\ref{tab:params} alone, retyping \eqref{eq:gstress}--\eqref{eq:cyc}
+rather than calling the implementation's own fade routines. Worst
+absolute disagreement against the reported values: \num{1.016e-20} on
+$\dQ^{\mathrm{cal,win}}$, exactly zero on $\dQ^{\mathrm{cal,park}}$ and
+$\dQ^{\mathrm{cyc}}$, and \num{1.355e-20} on the total.
+
+\paragraph{Sensitivity to the pack cost.}
+$W^{\mathrm{marg}}$ and Net are linear in $\pi_{\mathrm{chem}}$:
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Scenario & $\pi_{\mathrm{NMC}}$ (\si{\rupee\per\kilo\watt\hour}) & $W^{\mathrm{marg}}$ & Net \\
+\midrule
+$0.75\times$           & \num{9300}  & \SI{21.77}{\rupee} & \SI{121.55}{\rupee} \\
+baseline               & \num{12400} & \SI{29.02}{\rupee} & \SI{114.30}{\rupee} \\
+$1.25\times$           & \num{15500} & \SI{36.28}{\rupee} & \SI{107.04}{\rupee} \\
+BEV-pack average       & \num{9584}  & \SI{22.43}{\rupee} & \SI{120.89}{\rupee} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Provenance and limitations}
+\label{sec:provenance}
+
+\paragraph{LFP calendar: reproduced, not approximated.}
+The LFP calendar coefficients are Table~7 of Naumann et
+al.~\cite{naumann2018}, converted as stated in
+Table~\ref{tab:params}. The implementation reproduces that paper's own
+published projection --- \SI{19.0}{\percent} capacity loss at 20 years,
+\SI{25}{\celsius}, \SI{50}{\percent} SOC --- as \SI{19.01}{\percent},
+and agrees with their Eq.~(3) to a relative \num{1e-6} across
+temperatures \SIrange{0}{60}{\celsius}, all states of charge and
+horizons from six months to twenty years. Both checks are asserted in
+the test suite, so a later edit to a coefficient breaks a test rather
+than quietly invalidating the citation.
+
+\paragraph{NMC: Schmalstieg et al.\ (2014), in part.}
+The NMC coefficients come from Schmalstieg et
+al.~\cite{schmalstieg2014}, a Sanyo UR18650E study of more than sixty
+cells covering both calendar and cycle ageing. Four quantities are
+theirs. The calendar time exponent $\alpha = 0.75$ is their Section~3.2
+choice, adopted after a $\sqrt{t}$ law fitted their data poorly. The
+activation energy follows from the exponent $\exp(-6976/T)$ of their
+Eq.~(14), giving $E_a = 6976R = \SI{58.0}{\kilo\joule\per\mole}$ --- not
+the \SI{24}{\kilo\joule\per\mole} used in an earlier version of this
+formulation, which understates the temperature sensitivity by a factor
+of \num{2.42} and the \SIrange{25}{40}{\celsius} acceleration by
+\num{1.93}. The cycle throughput exponent $\beta = 0.5$ is their
+Eq.~(18). And the depth coefficient is fixed by the ratio of the two
+depth terms in their Eq.~(20),
+$c_D = \num{4.081e-3} / \num{7.600e-4} = \num{5.3697}$, against the
+value of unity previously assumed; the ratio is invariant to whether
+their charge throughput counts one or both directions.
+
+Four things are \emph{not} theirs and must not be attributed. Their
+calendar ageing is parameterised on cell \emph{voltage}, linearly,
+$a_{\mathrm{cap}} \propto 7.543V - 23.75$; converting to the
+state-of-charge form of \eqref{eq:gstress} requires the OCV curve their
+Fig.~1 plots but does not tabulate, so the hinge shape here remains a
+surrogate. Their depth term is \emph{additive} where
+\eqref{eq:cyc} is multiplicative; the two agree at the fitted baseline
+and diverge away from it. Every cycle test ran at 1C and
+\SI{35}{\celsius}, so the study supports no C-rate and no
+cycle-temperature dependence at all --- $c_C$ is therefore set to zero
+rather than invented, and treated as a sensitivity parameter alongside
+$\lambda_d$. Finally their Eq.~(20) carries a mean-voltage term,
+$\num{7.348e-3}(\bar{V} - 3.667)^2$, with no counterpart here; it is
+not small, since cycling about \SI{4.0}{\volt} rather than
+\SI{3.667}{\volt} doubles their cycle coefficient. Omitting it
+understates cycling at high mean state of charge, which is where V2G
+operates.
+
+\paragraph{Purewal et al.\ (2014) is not the NMC source.}
+An earlier version of this work cited ``Schmalstieg et al.\ (2014)''
+against the title of Wang/Purewal et al.~\cite{wang2014,purewal2014},
+conflating two distinct 2014 \emph{J.\ Power Sources} papers. Purewal
+et al.\ is a physics-based chemical--mechanical model at fixed
+\SI{50}{\percent} depth of discharge, with no state-of-charge stress
+function, a $\sqrt{t}$ calendar term, and cycle ageing as Paris'-law
+fatigue crack growth ($m = 2.2$). None of it is used here. It is
+retained in the bibliography because its Part~1 companion reports the
+empirical activation energy \SI{24.5}{\kilo\joule\per\mole} that the
+superseded \SI{24}{\kilo\joule\per\mole} most plausibly came from.
+
+\paragraph{Pack costs.}
+$\pi_{\mathrm{LFP}}$ and $\pi_{\mathrm{NMC}}$ derive from a reported
+chemistry split of \SI{81}{\USD\per\kilo\watt\hour} and
+\SI{128}{\USD\per\kilo\watt\hour} at approximately
+\SI{96.81}{\rupee\per\USD}, giving \SI{7841.6}{\rupee} and
+\SI{12391.7}{\rupee}, rounded to the table values. Three cautions. These
+are \emph{global volume-weighted pack prices across applications}, not
+Indian EV replacement-pack retail quotes; the same source separately
+reports BEV packs averaging \SI{99}{\USD\per\kilo\watt\hour}, equivalent
+to \SI{9584}{\rupee\per\kilo\watt\hour}, so the NMC figure sits about
+\SI{29}{\percent} above the BEV-specific average. The exchange rate is
+undated. And this is the single exogenous monetary assumption in the
+model, so the recommended $\pm\SI{25}{\percent}$ band should accompany
+any quoted rupee figure.
+
+\paragraph{Temperature.}
+Equation~\eqref{eq:arrhenius} propagates strongly. Pack temperature is
+held at a scenario constant here; fade precision beyond what that
+assumption supports should not be quoted.
+
+\paragraph{Multi-day coupling.}
+$N$ is a scenario input and is not advanced between sessions in the
+charge-only results. This is benign where $\varphi$ is small and
+$\sigma$ slowly varying, and degrades under V2G, where per-session
+throughput is several times larger.
+
+\paragraph{Asymmetric regularisation of the two power laws.}
+The cycle slope \eqref{eq:cycslope} is floored at $N^{\min}$, bounding
+$\sigma \le \beta (N^{\min})^{\beta-1} = \num{0.5}$ for a pack with no
+accumulated throughput. The age factor \eqref{eq:agefactor} carries no
+counterpart: $\psi$ grows without bound as $t \to 0$
+($\psi = \num{1.78}$ at \SI{0.1}{\yr}, \num{3.16} at \SI{0.01}{\yr} for
+NMC) and only a non-positive age is rejected. Both expressions are
+singular derivatives of the same power-law form, so the absence of a
+floor on one is an inconsistency rather than a modelling choice. Results
+for near-new packs should be treated with care until an explicit minimum
+anchor age is introduced.
+
+\paragraph{Depth measure.}
+Equation~\eqref{eq:delta} uses the full-session excursion as the depth
+proxy. Validation against rainflow counting is outstanding and should
+compare \emph{offer rankings} rather than absolute fade.
+
+\begin{thebibliography}{9}
+
+\bibitem{naumann2018}
+M.~Naumann, M.~Schimpe, P.~Keil, H.~C. Hesse, A.~Jossen,
+``Analysis and modeling of calendar aging of a commercial
+LiFePO$_4$/graphite cell,''
+\emph{Journal of Energy Storage}, vol.~17, pp.~153--169, 2018.
+doi:10.1016/j.est.2018.01.019
+
+\bibitem{wang2014}
+J.~Wang, J.~Purewal, P.~Liu, J.~Hicks-Garner, S.~Soukazian, E.~Sherman,
+A.~Sorenson, L.~Vu, H.~Tataria, M.~W. Verbrugge,
+``Degradation of lithium ion batteries employing graphite negatives and
+nickel-cobalt-manganese oxide $+$ spinel manganese oxide positives:
+Part~1, aging mechanisms and life estimation,''
+\emph{Journal of Power Sources}, vol.~269, pp.~937--948, 2014.
+doi:10.1016/j.jpowsour.2014.07.030
+
+\bibitem{purewal2014}
+J.~Purewal, J.~Wang, J.~Graetz, S.~Soukiazian, H.~Tataria,
+M.~W. Verbrugge,
+``Degradation of lithium ion batteries employing graphite negatives and
+nickel-cobalt-manganese $+$ spinel manganese oxide positives:
+Part~2, chemical-mechanical degradation model,''
+\emph{Journal of Power Sources}, 2014.
+
+\bibitem{schmalstieg2014}
+J.~Schmalstieg, S.~K\"abitz, M.~Ecker, D.~U. Sauer,
+``A holistic aging model for Li(NiMnCo)O$_2$ based 18650 lithium-ion
+batteries,''
+\emph{Journal of Power Sources}, vol.~257, pp.~325--334, 2014.
+doi:10.1016/j.jpowsour.2014.02.012
+
+\end{thebibliography}
+
+\end{document}

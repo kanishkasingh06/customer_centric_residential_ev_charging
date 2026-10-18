@@ -170,6 +170,8 @@ def generate_ev_menu_v2g(
     guard_weight: float = 0.0,
     restarts: int = 1,
     maximum_ready_steps: int = 4,
+    target_tiers: tuple[float, ...] | None = (0.8, 1.0),
+    target_tier_count: int | None = None,
 ) -> V2GMenu:
     """Generate a V2G customer menu for one EV and one connected session."""
     model = get_ev_model(ev_model)
@@ -231,6 +233,8 @@ def generate_ev_menu_v2g(
         guard_weight=guard_weight,
         restarts=restarts,
         maximum_ready_steps=maximum_ready_steps,
+        target_tiers=target_tiers,
+        target_tier_count=target_tier_count,
     )
     compacted = compact(offers)
     efficient = pareto_filter(compacted)
