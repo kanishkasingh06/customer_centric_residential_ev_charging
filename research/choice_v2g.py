@@ -48,6 +48,19 @@ ATTRIBUTES = ("cost", "wear", "delay", "soc", "export")
 #: and the pack cost are in the same unit.
 REFERENCE_MONEY_WEIGHT = 0.020
 
+#: End of life, as a fraction of initial capacity lost.  Wear is priced
+#: as a write-down of the WHOLE pack over the fade it survives, not of
+#: the capacity increment lost:
+#:
+#:     W = (dQ / dQ_EoL) * B_max * pi
+#:
+#: Reaching end of life costs an owner a pack, not the 20% of capacity
+#: that was lost getting there.  ``choice.py`` omits the divisor and so
+#: undercharges wear by exactly this factor; Preis and Biedenbach (2023)
+#: review the V2G optimisation literature and find the whole-pack form
+#: is what it uses, with 20% the standard threshold.
+END_OF_LIFE_CAPACITY_LOSS = 0.20
+
 
 @dataclass(frozen=True)
 class SegmentSpec:
@@ -89,7 +102,9 @@ def attribute_matrix(
     Columns are cost, LATENESS in hours, wear, delivered SOC, exported
     kWh -- in the declared ATTRIBUTES order.  Wear is in the same
     currency as cost, so their ratio is the only free quantity, which
-    is the point of pricing fade at all.
+    is the point of pricing fade at all.  It is divided by
+    END_OF_LIFE_CAPACITY_LOSS, making it a write-down of the whole pack
+    rather than of the capacity increment; see that constant.
 
     Delay is **lateness against the customer's stated ready-by
     deadline**, floored at zero, not elapsed time since plug-in.  The
@@ -107,7 +122,10 @@ def attribute_matrix(
         rows.append(
             (
                 offer.charging_cost,
-                offer.capacity_fade * battery_capacity_kwh * pack_cost_per_kwh,
+                offer.capacity_fade
+                / END_OF_LIFE_CAPACITY_LOSS
+                * battery_capacity_kwh
+                * pack_cost_per_kwh,
                 max(0.0, (offer.ready_minute - deadline_minute) / 60.0),
                 offer.delivered_soc,          # NOT target_soc; see module docstring
                 offer.export_energy_kwh,

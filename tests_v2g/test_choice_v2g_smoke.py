@@ -89,11 +89,24 @@ def test_delay_is_lateness_against_the_deadline_not_time_since_plug_in() -> None
 
 
 def test_wear_is_in_the_same_currency_as_cost() -> None:
+    """Wear writes down the WHOLE pack over the fade it survives.
+
+    Not the capacity increment lost: reaching end of life costs an owner
+    a pack, not the 20% of capacity that was lost getting there.  The
+    divisor is what ``choice.py`` omits, and omitting it undercharges
+    wear exactly fivefold.
+    """
+    from choice_v2g import END_OF_LIFE_CAPACITY_LOSS
+
     matrix = attribute_matrix(
         _menu(), pack_cost_per_kwh=12400.0, battery_capacity_kwh=78.0,
         deadline_minute=1860,
     )
-    assert matrix[0, 1] == pytest.approx(4e-5 * 78.0 * 12400.0)
+    assert matrix[0, 1] == pytest.approx(
+        4e-5 / END_OF_LIFE_CAPACITY_LOSS * 78.0 * 12400.0
+    )
+    # and the fivefold relationship to the superseded form, stated
+    assert matrix[0, 1] == pytest.approx(5.0 * 4e-5 * 78.0 * 12400.0)
 
 
 def test_zero_export_weight_reproduces_the_four_attribute_model() -> None:
