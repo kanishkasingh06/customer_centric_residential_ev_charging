@@ -9,10 +9,12 @@ still 0.339 and the next step drops to 0.239.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from evmenu_v2g import V2GEnvelope, generate_ev_menu_v2g
 
-TARIFF = "data/hourly_tariff.csv"
+RESEARCH_DIR = Path(__file__).parent
+TARIFF = RESEARCH_DIR / "hourly_tariff.csv"
 K = 7
 
 ENV = V2GEnvelope(
@@ -22,17 +24,17 @@ ENV = V2GEnvelope(
     session_export_allowance_kwh=15.0,
     allow_export_after_ready=False,
 )
-CASE = dict(
-    ev_model="generic_60kwh_nmc",
-    arrival_time="19:30",
-    departure_time="08:00",
-    current_soc=0.35,
-    next_trip_distance_km=40.0,
-    battery_age_years=4.0,
-    accumulated_equivalent_full_cycles=1200.0,
-    levels=4,
-    maximum_ready_steps=4,
-)
+CASE = {
+    "ev_model": "generic_60kwh_nmc",
+    "arrival_time": "19:30",
+    "departure_time": "08:00",
+    "current_soc": 0.35,
+    "next_trip_distance_km": 40.0,
+    "battery_age_years": 4.0,
+    "accumulated_equivalent_full_cycles": 1200.0,
+    "levels": 4,
+    "maximum_ready_steps": 4,
+}
 
 
 def farthest_point(offers, k):
@@ -127,7 +129,7 @@ def main() -> None:
         "price": price,
         "schedules": schedules,
     }
-    with open("menu7.json", "w") as fh:
+    with (RESEARCH_DIR / "menu7.json").open("w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=1)
 
     print(f"funnel {out['meta']['funnel']}  min separation {sep:.3f}")

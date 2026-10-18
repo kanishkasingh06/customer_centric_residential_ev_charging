@@ -19,26 +19,26 @@ ENVELOPE = V2GEnvelope(
 )
 
 CASES = [
-    dict(
-        ev_model="generic_60kwh_nmc",
-        ev_id="EV-A (NMC, aged pack)",
-        arrival_time="19:30",
-        departure_time="08:00",
-        current_soc=0.35,
-        next_trip_distance_km=40.0,
-        battery_age_years=4.0,
-        accumulated_equivalent_full_cycles=1200.0,
-    ),
-    dict(
-        ev_model="generic_40kwh_lfp",
-        ev_id="EV-B (LFP, newer pack)",
-        arrival_time="18:00",
-        departure_time="07:30",
-        current_soc=0.45,
-        next_trip_distance_km=25.0,
-        battery_age_years=1.5,
-        accumulated_equivalent_full_cycles=300.0,
-    ),
+    {
+        "ev_model": "generic_60kwh_nmc",
+        "ev_id": "EV-A (NMC, aged pack)",
+        "arrival_time": "19:30",
+        "departure_time": "08:00",
+        "current_soc": 0.35,
+        "next_trip_distance_km": 40.0,
+        "battery_age_years": 4.0,
+        "accumulated_equivalent_full_cycles": 1200.0,
+    },
+    {
+        "ev_model": "generic_40kwh_lfp",
+        "ev_id": "EV-B (LFP, newer pack)",
+        "arrival_time": "18:00",
+        "departure_time": "07:30",
+        "current_soc": 0.45,
+        "next_trip_distance_km": 25.0,
+        "battery_age_years": 1.5,
+        "accumulated_equivalent_full_cycles": 300.0,
+    },
 ]
 
 

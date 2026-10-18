@@ -265,15 +265,21 @@ def format_menu(menu: V2GMenu) -> str:
     """Render a menu as a fixed-width table."""
     lines = [
         f"EV {menu.ev_id}  ({menu.chemistry}, {menu.ev_model})",
-        f"  session {menu.arrival_minute // 60:02d}:{menu.arrival_minute % 60:02d}"
-        f" -> {menu.departure_minute // 60:02d}:{menu.departure_minute % 60:02d}"
-        f"   dt={menu.timestep_minutes}min",
-        f"  envelope: discharge {menu.envelope.discharge_power_kw:.1f} kW,"
-        f" reserve {menu.envelope.reserve_soc:.0%},"
-        f" allowance {menu.envelope.session_export_allowance_kwh}"
-        f"   P_sell/P = {menu.sell_to_buy_ratio:.2f}",
-        f"  generated {len(menu.generated)} -> compacted {len(menu.compacted)}"
-        f" -> displayed {len(menu.displayed)}",
+        (
+            f"  session {menu.arrival_minute // 60:02d}:{menu.arrival_minute % 60:02d}"
+            f" -> {menu.departure_minute // 60:02d}:{menu.departure_minute % 60:02d}"
+            f"   dt={menu.timestep_minutes}min"
+        ),
+        (
+            f"  envelope: discharge {menu.envelope.discharge_power_kw:.1f} kW,"
+            f" reserve {menu.envelope.reserve_soc:.0%},"
+            f" allowance {menu.envelope.session_export_allowance_kwh}"
+            f"   P_sell/P = {menu.sell_to_buy_ratio:.2f}"
+        ),
+        (
+            f"  generated {len(menu.generated)} -> compacted {len(menu.compacted)}"
+            f" -> displayed {len(menu.displayed)}"
+        ),
         "",
         "  ready   target   saving    fade %    import   export   EFC",
         "  " + "-" * 60,

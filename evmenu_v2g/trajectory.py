@@ -8,9 +8,10 @@ Decision vector ``x = [E_in(0..n-1), E_out(0..n-1)]``, both grid-side.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from scipy.optimize import minimize
+from scipy.optimize import minimize  # type: ignore[import-untyped]
 
 from evmenu.degradation import (
     _HOURS_PER_YEAR,
@@ -25,6 +26,12 @@ from evmenu.schemas import ChargingSession, EVSpec, PlanningSignal
 
 from .envelope import V2GEnvelope
 from .fade import BidirectionalFade, assess_trajectory
+
+#: A decision vector, ``[E_in | E_out]``.  SLSQP hands back a numpy array,
+#: so every consumer accepts any float sequence and indexes it.
+_Vector = Sequence[float]
+#: One SLSQP constraint record: ``{"type", "fun", "jac"}``.
+_Constraint = dict[str, object]
 
 _FEASIBILITY_TOLERANCE = 1e-6
 _SIMULTANEITY_TOLERANCE = 1e-9
@@ -159,7 +166,7 @@ def capacities(ctx: RequestContext) -> tuple[list[float], list[float]]:
     return cap_in, cap_out
 
 
-def battery_states(ctx: RequestContext, x: list[float] | tuple[float, ...]) -> list[float]:
+def battery_states(ctx: RequestContext, x: _Vector) -> list[float]:
     """Battery energy at every state boundary, ``n + 1`` values."""
     n = ctx.n
     eta_in = ctx.ev.charging_efficiency
@@ -211,7 +218,7 @@ def _build_constraints(
     saving_low: float | None,
     saving_high: float | None,
     fade_cap: float | None,
-) -> list[dict]:
+) -> list[_Constraint]:
     n = ctx.n
     b_max = ctx.ev.battery_capacity_kwh
     b_reserve = ctx.reserve_energy_kwh
@@ -223,14 +230,22 @@ def _build_constraints(
     def _state_jac(k: int) -> list[float]:
         return _state_jacobian_row(ctx, k)
 
-    cons: list[dict] = []
+    def _const_jac(row: list[float]) -> Callable[[_Vector], list[float]]:
+        """Bind a fixed jacobian row without a mutable default argument."""
+        return lambda _x: row
+
+    def _state_fun(k: int, offset: float, sign: float) -> Callable[[_Vector], float]:
+        """Bind k by closure rather than by default argument."""
+        return lambda x: sign * (battery_states(ctx, x)[k] - offset)
+
+    cons: list[_Constraint] = []
 
     # Terminal equality, eq. (39).
     cons.append(
         {
             "type": "eq",
-            "fun": lambda x: battery_states(ctx, x)[n] - b_terminal,
-            "jac": lambda x, row=_state_jac(n): row,
+            "fun": _state_fun(n, b_terminal, 1.0),
+            "jac": _const_jac(_state_jac(n)),
         }
     )
 
@@ -239,15 +254,15 @@ def _build_constraints(
         cons.append(
             {
                 "type": "ineq",
-                "fun": lambda x, k=k: battery_states(ctx, x)[k] - b_reserve,
-                "jac": lambda x, row=_state_jac(k): row,
+                "fun": _state_fun(k, b_reserve, 1.0),
+                "jac": _const_jac(_state_jac(k)),
             }
         )
         cons.append(
             {
                 "type": "ineq",
-                "fun": lambda x, k=k: b_max - battery_states(ctx, x)[k],
-                "jac": lambda x, row=[-v for v in _state_jac(k)]: row,
+                "fun": _state_fun(k, b_max, -1.0),
+                "jac": _const_jac([-v for v in _state_jac(k)]),
             }
         )
 
@@ -257,8 +272,8 @@ def _build_constraints(
         cons.append(
             {
                 "type": "ineq",
-                "fun": lambda x, k=k: battery_states(ctx, x)[k] - floor,
-                "jac": lambda x, row=_state_jac(k): row,
+                "fun": _state_fun(k, floor, 1.0),
+                "jac": _const_jac(_state_jac(k)),
             }
         )
 
@@ -325,7 +340,7 @@ def _build_constraints(
 # ---------------------------------------------------------------------------
 
 
-def _cost_objective(ctx: RequestContext, x) -> tuple[float, list[float]]:
+def _cost_objective(ctx: RequestContext, x: _Vector) -> tuple[float, list[float]]:
     n = ctx.n
     prices = [ctx.signal.price_per_kwh[ctx.session.arrival_step + i] for i in range(n)]
     sell = list(ctx.sell_price)
@@ -338,7 +353,7 @@ def _cost_objective(ctx: RequestContext, x) -> tuple[float, list[float]]:
 
 
 def _fade_objective(
-    ctx: RequestContext, x, *, guard_weight: float = 0.0
+    ctx: RequestContext, x: _Vector, *, guard_weight: float = 0.0
 ) -> tuple[float, list[float]]:
     """Solver surrogate, eq. (58)-(59): window calendar fade + cycle fade.
 
@@ -466,7 +481,7 @@ def _fade_objective(
     return total, jac
 
 
-def _net_square_objective(ctx: RequestContext, x) -> tuple[float, list[float]]:
+def _net_square_objective(ctx: RequestContext, x: _Vector) -> tuple[float, list[float]]:
     """Realization objective: squared NET grid power, eq. (61)."""
     n = ctx.n
     durations = interval_durations(ctx)
@@ -610,7 +625,7 @@ def warm_start(ctx: RequestContext) -> list[float]:
 # ---------------------------------------------------------------------------
 
 
-def evaluate(ctx: RequestContext, x, *, bau_cost: float) -> Trajectory:
+def evaluate(ctx: RequestContext, x: _Vector, *, bau_cost: float) -> Trajectory:
     """Evaluate a decision vector: states, cost, saving, fade, violations."""
     n = ctx.n
     states = battery_states(ctx, x)
@@ -690,7 +705,6 @@ def solve(
     not by the solver's own ``success`` flag -- see the comment at the
     rejection site.
     """
-    n = ctx.n
     cap_in, cap_out = capacities(ctx)
     bounds = [(0.0, c) for c in cap_in] + [(0.0, c) for c in cap_out]
     cons = _build_constraints(
@@ -701,17 +715,20 @@ def solve(
         fade_cap=fade_cap,
     )
 
-    if objective == "cost":
-        fun = lambda x: _cost_objective(ctx, x)[0]
-        jac = lambda x: _cost_objective(ctx, x)[1]
-    elif objective == "fade":
-        fun = lambda x: _fade_objective(ctx, x, guard_weight=guard_weight)[0]
-        jac = lambda x: _fade_objective(ctx, x, guard_weight=guard_weight)[1]
-    elif objective == "net_square":
-        fun = lambda x: _net_square_objective(ctx, x)[0]
-        jac = lambda x: _net_square_objective(ctx, x)[1]
-    else:  # pragma: no cover - programming error
+    objectives: dict[str, Callable[[_Vector], tuple[float, list[float]]]] = {
+        "cost": lambda x: _cost_objective(ctx, x),
+        "fade": lambda x: _fade_objective(ctx, x, guard_weight=guard_weight),
+        "net_square": lambda x: _net_square_objective(ctx, x),
+    }
+    if objective not in objectives:  # pragma: no cover - programming error
         raise ValueError(f"unknown objective {objective!r}")
+    both = objectives[objective]
+
+    def fun(x: _Vector) -> float:
+        return both(x)[0]
+
+    def jac(x: _Vector) -> list[float]:
+        return both(x)[1]
 
     incumbent = warm_start(ctx)
     best_x, best_value = None, None
@@ -765,7 +782,7 @@ def solve(
                 constraints=cons,
                 options={"maxiter": maxiter, "ftol": ftol},
             )
-        except Exception:  # pragma: no cover - solver robustness
+        except (ValueError, TypeError, ArithmeticError):  # pragma: no cover
             continue
         if result.x is None:
             continue
@@ -803,10 +820,10 @@ def _repair_complementarity(
     ctx: RequestContext,
     relaxed: Trajectory,
     *,
-    fun,
-    jac,
+    fun: Callable[[_Vector], float],
+    jac: Callable[[_Vector], list[float]],
     bounds: list[tuple[float, float]],
-    cons: list[dict],
+    cons: list[_Constraint],
     bau_cost: float,
     saving_low: float | None,
     saving_high: float | None,
@@ -874,7 +891,7 @@ def _repair_complementarity(
             constraints=cons,
             options={"maxiter": maxiter, "ftol": ftol},
         )
-    except Exception:  # pragma: no cover - solver robustness
+    except (ValueError, TypeError, ArithmeticError):  # pragma: no cover
         return None
     if result.x is None:
         return None
@@ -891,9 +908,7 @@ def _within_band(saving: float, low: float | None, high: float | None) -> bool:
     tol = 1e-6
     if low is not None and saving < low - tol:
         return False
-    if high is not None and saving > high + tol:
-        return False
-    return True
+    return not (high is not None and saving > high + tol)
 
 
 def require_feasible(ctx: RequestContext) -> None:

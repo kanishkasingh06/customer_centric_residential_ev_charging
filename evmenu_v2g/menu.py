@@ -149,7 +149,7 @@ def candidate_ready_steps(
     if span <= maximum:
         return list(range(earliest, latest + 1))
     stride = span / maximum
-    steps = sorted({earliest + int(round(i * stride)) for i in range(maximum + 1)})
+    steps = sorted({earliest + round(i * stride) for i in range(maximum + 1)})
     return [min(latest, s) for s in steps]
 
 
@@ -254,7 +254,7 @@ def generate_offers(
                         # produced colliding ids, which every request with
                         # a small S^max does.
                         offer_id=(
-                            f"{ev.ev_id}-z{int(round(target * 100))}"
+                            f"{ev.ev_id}-z{round(target * 100)}"
                             f"-r{ready_step}-k{index}"
                         ),
                         ready_step=ready_step,

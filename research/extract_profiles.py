@@ -7,13 +7,13 @@ objectives, so the profiles are directly comparable.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from evmenu.catalog import get_ev_model
 from evmenu.degradation import DegradationSettings
-from evmenu.schemas import EVSpec
-
-from evmenu_v2g import V1G_ENVELOPE, V2GEnvelope
 from evmenu.pricing import load_weekly_price_profile_csv
+from evmenu.schemas import EVSpec
+from evmenu_v2g import V1G_ENVELOPE, V2GEnvelope
 from evmenu_v2g.api import build_session_and_signal
 from evmenu_v2g.menu import bau_cost_for, saving_levels
 from evmenu_v2g.trajectory import RequestContext, evaluate, solve, warm_start
@@ -25,7 +25,8 @@ CURRENT_SOC = 0.35
 TRIP_KM = 40.0
 TARGET = 0.80  # the 80% tier; the service minimum is reported separately
 
-TARIFF_CSV = "data/hourly_tariff.csv"
+RESEARCH_DIR = Path(__file__).parent
+TARIFF_CSV = RESEARCH_DIR / "hourly_tariff.csv"
 ARRIVAL_DAY = "Wed"
 RESERVE = 0.20
 
@@ -186,7 +187,7 @@ def main() -> None:
         ],
         "profiles": profiles,
     }
-    with open("profiles.json", "w") as handle:
+    with (RESEARCH_DIR / "profiles.json").open("w", encoding="utf-8") as handle:
         json.dump(out, handle, indent=1)
     for key, value in profiles.items():
         print(

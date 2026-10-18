@@ -17,6 +17,8 @@ from evmenu_v2g import (
     throughput_fraction,
 )
 from evmenu_v2g.api import build_session_and_signal, default_tou_profile
+from evmenu_v2g.menu import bau_cost_for
+from evmenu_v2g.trajectory import RequestContext, solve
 
 
 def _ev(model_id: str = "generic_60kwh_nmc") -> EVSpec:
@@ -190,9 +192,46 @@ def test_session_crossing_midnight_gets_one_allowance() -> None:
     )
     # The session spans midnight: arrival is on day 0, departure on day 1.
     assert session.arrival_step < 48 <= session.departure_step
-    menu = generate_ev_menu_v2g(envelope=ENVELOPE, levels=2, maximum_ready_steps=2)
-    for offer in menu.generated:
-        assert offer.export_energy_kwh <= ENVELOPE.session_export_allowance_kwh + 1e-6
+
+    # Built the session and signal, then asserted against a DIFFERENT menu
+    # and re-checked the bound test_export_allowance_respected already
+    # covers.  That tested nothing about doubling.  What doubling would
+    # look like is a session drawing its full allowance on each side of
+    # midnight, so split the export at the boundary and require the two
+    # halves to share one allocation rather than hold one each.
+    allowance = ENVELOPE.session_export_allowance_kwh
+    assert allowance is not None
+    ctx = RequestContext(
+        ev=ev, session=session, signal=signal, envelope=ENVELOPE,
+        settings=DegradationSettings(), ready_step=session.departure_step,
+        target_soc=0.8,
+        sell_price=tuple(
+            signal.price_per_kwh[session.arrival_step + i] * 0.8
+            for i in range(session.departure_step - session.arrival_step)
+        ),
+        discharge_severity=1.0,
+    )
+    bau = bau_cost_for(
+        ev=ev, session=session, signal=signal,
+        terminal_energy_kwh=ctx.terminal_energy_kwh,
+    )
+    # Maximise export by maximising saving: the allowance is what stops it.
+    solution = solve(ctx, objective="cost", bau_cost=bau, restarts=1)
+    assert solution is not None
+    before, after = 0.0, 0.0
+    for index, energy in enumerate(solution.grid_out_kwh):
+        minute = signal.interval_start_minutes[session.arrival_step + index]
+        (before, after) = (
+            (before + energy, after) if minute // 1440 == session.arrival_step // 48
+            else (before, after + energy)
+        )
+    assert before > 1e-6 and after > 1e-6, (
+        "expected export on both sides of midnight, else this proves nothing"
+    )
+    assert before + after <= allowance + 1e-6, (
+        f"session drew {before:.3f} before midnight and {after:.3f} after, "
+        f"totalling more than the one allowance of {allowance}"
+    )
 
 
 def test_export_reduces_window_calendar_fade_somewhere(menu) -> None:
@@ -245,8 +284,7 @@ def test_export_window_crossing_midnight_is_honoured() -> None:
 
 def test_export_window_capacities_span_midnight() -> None:
     """The same thing where it bites: the per-interval export caps."""
-    from evmenu_v2g.api import build_session_and_signal, default_tou_profile
-    from evmenu_v2g.trajectory import RequestContext, capacities
+    from evmenu_v2g.trajectory import capacities
 
     ev = _ev()
     session, signal = build_session_and_signal(
