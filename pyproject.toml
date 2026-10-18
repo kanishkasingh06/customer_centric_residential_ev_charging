@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["evmenu*"]
+include = ["evmenu*", "evmenu_v2g*"]
 
 [project.scripts]
 evmenu = "evmenu.cli:main"
@@ -32,7 +32,7 @@ research = [
 
 [tool.pytest.ini_options]
 addopts = "-q"
-testpaths = ["tests"]
+testpaths = ["tests", "tests_v2g"]
 
 [tool.ruff]
 line-length = 100
@@ -41,4 +41,4 @@ target-version = "py311"
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["evmenu"]
+packages = ["evmenu", "evmenu_v2g"]

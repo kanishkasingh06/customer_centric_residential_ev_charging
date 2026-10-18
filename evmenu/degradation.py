@@ -22,6 +22,7 @@ from numbers import Real
 
 from .exceptions import PhysicalConstraintError, SchemaValidationError
 from .menu import GeneratedMenu, MenuCandidate
+from .ocv import SANYO_UR18650E_OCV, interpolate_ocv
 from .schemas import (
     ChargingSession,
     Chemistry,
@@ -207,6 +208,44 @@ class ChemistryDegradationParameters:
     cycle_dod_coefficient: float = 1.0
     cycle_c_rate_coefficient: float = 1.0
     cycle_time_exponent: float = 0.5
+    #: Optional cubic SOC term, ``a3 * (s - s_c)^3``, added to the hinge
+    #: form.  Naumann et al. (2018) fit LFP calendar ageing with a cubic
+    #: centred on mid-SOC rather than a knee, and the two shapes are not
+    #: interchangeable: a hinge is flat below its knee where the cubic is
+    #: still rising.  Defaults leave every existing parameter set alone.
+    calendar_cubic_coefficient: float = 0.0
+    calendar_cubic_center: float = 0.5
+    #: Reference temperature for this chemistry's Arrhenius factor.  None
+    #: falls back to the scenario-wide ``DegradationSettings`` value; a
+    #: published parameter set carries its own and must use it, since the
+    #: fitted activation energy is only meaningful against the reference
+    #: the authors fitted it at.
+    calendar_reference_temperature_c: float | None = None
+    #: Voltage-space calendar form, used when ``calendar_voltage_scale``
+    #: is positive: ``g(s) = scale * (slope * V(s) + intercept)`` with
+    #: ``V`` read off ``ocv_curve``.  This replaces the SOC polynomial
+    #: entirely rather than adding to it, because a model fitted on
+    #: voltage and one fitted on state of charge are alternatives, not
+    #: components.
+    calendar_voltage_scale: float = 0.0
+    calendar_voltage_slope: float = 0.0
+    calendar_voltage_intercept: float = 0.0
+    ocv_curve: tuple[tuple[int, float], ...] = ()
+    #: Mean-voltage cycle term, ``k * (Vbar - centre)^2``, added to the
+    #: cycle coefficient.  Schmalstieg et al. (2014) Eq. (20) carries one
+    #: and it is not small: cycling about 4.0 V rather than 3.667 V
+    #: doubles their coefficient.
+    cycle_mean_voltage_coefficient: float = 0.0
+    cycle_mean_voltage_center: float = 0.0
+    #: When true the depth term is ADDITIVE, ``c_ref + c_D_abs * delta``,
+    #: matching Eq. (20); otherwise multiplicative as before.
+    cycle_depth_is_additive: bool = False
+    #: Cubic depth term, ``k * (delta - centre)^3``, added to the cycle
+    #: coefficient in the additive branch.  Naumann et al. (2020) fit LFP
+    #: cycle ageing with a cubic in depth of cycle rather than a linear
+    #: term; see NAUMANN_LFP_2020_CYCLE_PARAMETERS.
+    cycle_depth_cubic_coefficient: float = 0.0
+    cycle_depth_cubic_center: float = 0.0
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -220,8 +259,25 @@ class ChemistryDegradationParameters:
             ("cycle_dod_coefficient", self.cycle_dod_coefficient),
             ("cycle_c_rate_coefficient", self.cycle_c_rate_coefficient),
             ("cycle_time_exponent", self.cycle_time_exponent),
+            ("calendar_cubic_coefficient", self.calendar_cubic_coefficient),
+            ("calendar_cubic_center", self.calendar_cubic_center),
+            ("calendar_voltage_scale", self.calendar_voltage_scale),
+            ("calendar_voltage_slope", self.calendar_voltage_slope),
+            ("calendar_voltage_intercept", self.calendar_voltage_intercept),
+            ("cycle_mean_voltage_coefficient", self.cycle_mean_voltage_coefficient),
+            ("cycle_mean_voltage_center", self.cycle_mean_voltage_center),
+            ("cycle_depth_cubic_coefficient", self.cycle_depth_cubic_coefficient),
+            ("cycle_depth_cubic_center", self.cycle_depth_cubic_center),
         ):
             _finite(name, value)
+        if self.calendar_reference_temperature_c is not None:
+            reference = _finite(
+                "calendar_reference_temperature_c", self.calendar_reference_temperature_c
+            )
+            if reference <= -273.15:
+                raise PhysicalConstraintError(
+                    "calendar_reference_temperature_c must exceed absolute zero."
+                )
         if self.calendar_a0 < 0.0 or self.calendar_a1 < 0.0 or self.calendar_a2 < 0.0:
             raise PhysicalConstraintError("calendar coefficients must be non-negative.")
         if not 0.0 <= self.calendar_soc_knee <= 1.0:
@@ -294,6 +350,188 @@ DEFAULT_LFP_DEGRADATION_PARAMETERS = BatteryDegradationParameters(
     source_equation_or_section="calendar and cycle aging equations; Section 5 methodology mapping",
     source_implementation="literature-anchor calibration; original fitted table unavailable in checkout",
 )
+#: LFP calendar ageing exactly as published in Naumann et al. (2018),
+#: "Analysis and modeling of calendar aging of a commercial LiFePO4/graphite
+#: cell", J. Energy Storage 17, 153-169, doi:10.1016/j.est.2018.01.019.
+#:
+#: Their Eq. (3) is  Qloss[%] = k_temp(T) * k_SOC(SOC) * sqrt(t_seconds),
+#: with Table 7 giving k_ref = 0.0012571 %/sqrt(s), Ea = 17126 J/mol,
+#: T_ref = 298.15 K, and the SOC factor as the CUBIC
+#: k_SOC = 2.8575 (SOC - 0.5)^3 + 0.60225.
+#:
+#: This package carries the differential form instead (eq. 15 of the paper),
+#: with calendar stress expressed as a fraction of capacity per year at the
+#: anchor age.  Converting:
+#:
+#:     g(s) = (k_ref / 100) * sqrt(S) * 0.5 * k_SOC(s),   S = 8760*3600
+#:          = 0.0352974339470166 * (2.8575 (s - 0.5)^3 + 0.60225)
+#:          = 0.10086241750359994 (s - 0.5)^3 + 0.021257879594590745
+#:
+#: Carried to full double precision deliberately: rounding the conversion
+#: constant to six figures shifts the reproduced 20-year projection in the
+#: fourth significant digit, which the agreement test below would flag.
+#:
+#: so a0 carries the constant and the cubic carries the SOC dependence; the
+#: hinge terms are unused.  Reproduces the authors' own stated projection of
+#: 19.0% loss at 20 years, 25 C, 50% SOC -- asserted in the test suite.
+NAUMANN_LFP_2018_PARAMETERS = ChemistryDegradationParameters(
+    calendar_a0=0.021257879594590745,
+    calendar_a1=0.0,
+    calendar_a2=0.0,
+    calendar_soc_knee=0.5,
+    calendar_time_exponent=0.50,
+    activation_energy_j_per_mol=17126.0,
+    calendar_cubic_coefficient=0.10086241750359994,
+    calendar_cubic_center=0.5,
+    calendar_reference_temperature_c=25.0,
+    # Naumann et al. is a CALENDAR-ONLY study; the companion cycle-ageing
+    # work is unpublished at the time of that paper.  The cycle terms below
+    # are this project's own structural assumption and are NOT attributable
+    # to it.  See the formulation note.
+    cycle_reference_coefficient=DEFAULT_LFP_PARAMETERS.cycle_reference_coefficient,
+    cycle_dod_coefficient=DEFAULT_LFP_PARAMETERS.cycle_dod_coefficient,
+    cycle_c_rate_coefficient=DEFAULT_LFP_PARAMETERS.cycle_c_rate_coefficient,
+    cycle_time_exponent=DEFAULT_LFP_PARAMETERS.cycle_time_exponent,
+)
+
+#: NMC coefficients from Schmalstieg et al. (2014), "A holistic aging model
+#: for Li(NiMnCo)O2 based 18650 lithium-ion batteries", J. Power Sources 257,
+#: 325-334, doi:10.1016/j.jpowsour.2014.02.012.  Sanyo UR18650E, 2.05 Ah.
+#:
+#: TAKEN FROM THE PAPER
+#:   Calendar, their Eq. (7) and (14):  C = 1 - a_cap * t^0.75,
+#:     a_cap(T,V) = (7.543 V - 23.75)e-6 * exp(-6976/T).
+#:     The time exponent 0.75 is theirs (Section 3.2: a sqrt law fitted their
+#:     data badly, so t^0.75 was adopted as a medium between linear and sqrt).
+#:     The Arrhenius exponent gives Ea = 6976 * R.  Stored as
+#:     6976 * 8.314462618 = 58001.691 J/mol so that THIS package's
+#:     Arrhenius reproduces their exponent exactly; the paper rounds R to
+#:     8.314 and states 58.0 kJ/mol, which is the same number to the
+#:     precision they print it.
+#:   Cycle, their Eq. (18) and (20):  C = 1 - b_cap * sqrt(Q),
+#:     b_cap = 7.348e-3 (Vbar - 3.667)^2 + 7.600e-4 + 4.081e-3 * dDOD.
+#:     sqrt(charge throughput) gives the 0.5 exponent.  The depth term is
+#:     LINEAR in depth and additive, and its ratio to the baseline fixes
+#:     c_D = 4.081e-3 / 7.600e-4 = 5.3697 -- invariant to whether Q counts
+#:     one or both directions.  c_ref follows from matching cumulative fade
+#:     per equivalent full cycle for their 2.05 Ah cell.
+#:
+#:   Calendar in VOLTAGE space, as published.  Their Eq. (14) is linear in
+#:     cell voltage, and Fig. 1 (digitised, see evmenu.ocv) supplies V(s).
+#:     Converting their per-day cumulative form to the per-year incremental
+#:     form used here:
+#:         g(s) = 0.75 * 365^0.75 * 1e6 * exp(-6976/T_ref) * (7.543 V(s) - 23.75)
+#:              = 0.004318413681008761 * (7.543 V(s) - 23.75)
+#:     One year at 25 C and 50% SOC gives 2.395% against the 2.390% their
+#:     Eq. (14) gives directly; the 0.2% gap is OCV digitisation.
+#:   Cycle depth ADDITIVE, with their mean-voltage term.  Eq. (20) is
+#:     b_cap = 7.348e-3 (Vbar - 3.667)^2 + 7.600e-4 + 4.081e-3 dDOD, applied
+#:     to sqrt(charge throughput in Ah).  Matching cumulative fade per
+#:     equivalent full cycle for their 2.05 Ah cell scales every term by
+#:     sqrt(2 * 2.05)/2 = 1.0124228365658292.
+#:
+#: NOT FROM THE PAPER, and not to be attributed to it
+#:   The C-rate factor.  Every cycle test was run at 1C and 35 C, so the
+#:     study contains no C-rate and no cycle-temperature dependence.
+#:     c_C is set to zero rather than invented; treat it as a sensitivity
+#:     parameter, as the V2G formulation already does for discharge severity.
+#:   The multiplicative form.  Their depth term is ADDITIVE,
+#:     b = base + k*dDOD, where this package multiplies, c_ref (1 + c_D d).
+#:     The two agree at the fitted baseline and diverge away from it.
+#:   The mean-voltage cycle term, 7.348e-3 (Vbar - 3.667)^2, has no
+#:     counterpart here at all.  It is not small: cycling about 4.0 V rather
+#:     than 3.667 V doubles b_cap.  Omitting it understates cycling at high
+#:     mean state of charge, which is exactly where V2G operates.
+SCHMALSTIEG_NMC_2014_PARAMETERS = ChemistryDegradationParameters(
+    # the SOC polynomial is unused: the voltage form below replaces it
+    calendar_a0=0.0,
+    calendar_a1=0.0,
+    calendar_a2=0.0,
+    calendar_soc_knee=0.0,
+    calendar_voltage_scale=0.004318413681008761,
+    calendar_voltage_slope=7.543,
+    calendar_voltage_intercept=-23.75,
+    ocv_curve=SANYO_UR18650E_OCV,
+    calendar_time_exponent=0.75,
+    activation_energy_j_per_mol=58001.691223168,
+    calendar_reference_temperature_c=25.0,
+    cycle_reference_coefficient=0.0007694413557900302,
+    cycle_dod_coefficient=0.0041316975960251495,
+    cycle_depth_is_additive=True,
+    cycle_mean_voltage_coefficient=0.007439283003085714,
+    cycle_mean_voltage_center=3.667,
+    cycle_c_rate_coefficient=0.0,
+    cycle_time_exponent=0.50,
+)
+
+#: LFP cycle ageing from Naumann, Spingler and Jossen (2020), "Analysis
+#: and modeling of cycle aging of a commercial LiFePO4/graphite cell",
+#: J. Power Sources 451, 227666, doi:10.1016/j.jpowsour.2019.227666 --
+#: the companion cycle study to the calendar paper above, same Sony/
+#: Murata US26650FTC1 cell, 19 test points over 885 days.  Combined with
+#: NAUMANN_LFP_2018_PARAMETERS this makes the LFP branch a reproduction
+#: end to end.
+#:
+#: Their Eq. (5):  Qloss_cyc[%] = k_T * k_Crate * k_DOC * FEC^z, z = 0.5.
+#:   Eq. (8), Table 6:  k_Crate = 0.0630 * C + 0.0971
+#:   Eq. (10), Table 6: k_DOC   = 4.0253 (DOC - 0.6)^3 + 1.0923
+#:   k_T = 1: Section 3.2.1 states the temperature influence on PURE
+#:   cycle ageing between 25 and 40 C was negligible, so their model
+#:   carries no cycle temperature term.  Neither does this one.
+#:
+#: Two consequences for what was previously unattributable.  The C-rate
+#: coefficient is now sourced: normalising k_Crate on its intercept gives
+#: c_C = 0.0630/0.0971 = 0.6488156539649845, where the NMC branch still has
+#: none.  And the depth term is CUBIC in depth of cycle centred on 0.6,
+#: not linear -- their Fig. 7a shows the fitted factor flattening through
+#: the mid range and rising at both ends.
+#:
+#: Converting Eq. (5) to fade per equivalent full cycle in the additive
+#: branch used here, Gamma * 2 = k_Crate * k_DOC / 100 at C = 0, scales
+#: both depth terms by 0.0971/200.
+#:
+#: Two caveats, both load-bearing for V2G.
+#:
+#: Shallow cycling is REVERSIBLE, and this model treats it as permanent.
+#: k_DOC was fitted on the 80% and 100% depth points only, because
+#: shallower cycling showed unsteady loss the authors could not explain
+#: at the time.  Spingler, Naumann and Jossen (2020), J. Electrochem.
+#: Soc. 167 040526, doi:10.1149/1945-7111/ab7900, explain it: cycling
+#: between 30% and 70% SOC, where the LFP voltage curve is flat, loses
+#: up to 21% capacity by 1000 FEC against 6% for full cycles, but
+#: holding at 0% or 100% SOC recovers 89% of it within 35 days.  The
+#: cause is non-uniform lithium distribution, not inventory loss.  So
+#: this parameterisation OVERSTATES permanent damage for shallow cycles
+#: -- which is where V2G arbitrage operates -- while the capacity is
+#: still unavailable to a customer who never performs a recovery hold.
+#: The model represents neither state.
+#:
+#: The depth and temperature terms are cell-specific, not chemistry-
+#: specific.  Wang et al. (2011), J. Power Sources 196(8) 3942-3948,
+#: doi:10.1016/j.jpowsour.2010.11.134, fit an A123 LFP cell and reach
+#: the opposite conclusion on both: depth of discharge negligible where
+#: this model has a 6.06x cubic, and a strong cycle Arrhenius term
+#: (Ea = 31.5 kJ/mol) where this model has none.  They agree only on the
+#: throughput exponent.  Treat both terms as a sensitivity axis.
+NAUMANN_LFP_2020_CYCLE_PARAMETERS = ChemistryDegradationParameters(
+    calendar_a0=NAUMANN_LFP_2018_PARAMETERS.calendar_a0,
+    calendar_a1=NAUMANN_LFP_2018_PARAMETERS.calendar_a1,
+    calendar_a2=NAUMANN_LFP_2018_PARAMETERS.calendar_a2,
+    calendar_soc_knee=NAUMANN_LFP_2018_PARAMETERS.calendar_soc_knee,
+    calendar_cubic_coefficient=NAUMANN_LFP_2018_PARAMETERS.calendar_cubic_coefficient,
+    calendar_cubic_center=NAUMANN_LFP_2018_PARAMETERS.calendar_cubic_center,
+    calendar_time_exponent=NAUMANN_LFP_2018_PARAMETERS.calendar_time_exponent,
+    activation_energy_j_per_mol=NAUMANN_LFP_2018_PARAMETERS.activation_energy_j_per_mol,
+    calendar_reference_temperature_c=25.0,
+    cycle_reference_coefficient=0.0005303116500000001,
+    cycle_dod_coefficient=0.0,
+    cycle_depth_cubic_coefficient=0.00195428315,
+    cycle_depth_cubic_center=0.6,
+    cycle_depth_is_additive=True,
+    cycle_c_rate_coefficient=0.6488156539649845,
+    cycle_time_exponent=0.50,
+)
+
 DEFAULT_NMC_DEGRADATION_PARAMETERS = BatteryDegradationParameters(
     chemistry="NMC",
     calendar=CalendarAgingParameters(
@@ -727,8 +965,34 @@ def calendar_soc_stress(
     value = _finite("soc", soc)
     if not 0.0 <= value <= 1.0:
         raise PhysicalConstraintError("soc must lie in [0, 1].")
+    if (
+        isinstance(parameters, ChemistryDegradationParameters)
+        and parameters.calendar_voltage_scale > 0.0
+    ):
+        voltage = interpolate_ocv(
+            _finite("soc", soc), parameters.ocv_curve or SANYO_UR18650E_OCV
+        )
+        stress = parameters.calendar_voltage_scale * (
+            parameters.calendar_voltage_slope * voltage
+            + parameters.calendar_voltage_intercept
+        )
+        if stress < 0.0:
+            raise PhysicalConstraintError(
+                "voltage-form calendar stress went negative; the OCV curve "
+                "dips below the linear term's zero crossing."
+            )
+        return stress
     hinge = max(value - knee, 0.0)
-    return a0 + a1 * value + a2 * hinge * hinge
+    cubic = 0.0
+    if isinstance(parameters, ChemistryDegradationParameters):
+        offset = value - parameters.calendar_cubic_center
+        cubic = parameters.calendar_cubic_coefficient * offset * offset * offset
+    stress = a0 + a1 * value + a2 * hinge * hinge + cubic
+    if stress < 0.0:
+        raise PhysicalConstraintError(
+            "calendar stress must be non-negative across [0, 1]; check the cubic term."
+        )
+    return stress
 
 
 def _relative_age_factor(
@@ -922,6 +1186,14 @@ def assess_candidate_degradation(
     )
 
     params = model.parameters_for(ev.chemistry)
+    # A published parameter set fits its activation energy against its own
+    # reference temperature; using the scenario default instead silently
+    # rescales every calendar term.
+    reference_temperature_c = (
+        model.reference_temperature_c
+        if params.calendar_reference_temperature_c is None
+        else params.calendar_reference_temperature_c
+    )
     profile = candidate.profile
     age_factor = _relative_age_factor(
         age_years=model.battery_age_years,
@@ -940,7 +1212,7 @@ def assess_candidate_degradation(
             calendar_soc_stress(soc, params)
             * _temperature_factor(
                 temperature_c,
-                model.reference_temperature_c,
+                reference_temperature_c,
                 params.activation_energy_j_per_mol,
             )
             * age_factor
