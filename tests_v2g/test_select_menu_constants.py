@@ -58,3 +58,29 @@ def test_compact_requires_an_explicit_tolerance() -> None:
     parameter = inspect.signature(compact).parameters["merge_tolerance"]
     assert parameter.default is inspect.Parameter.empty
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_single_mode_fronts_are_separable_and_comparable() -> None:
+    """V1G-only and V2G-only fronts, for the grid-impact comparison.
+
+    Both must be built the same way as the pooled front -- same merge
+    tolerance, same dominance -- or a difference between them could be
+    an artefact of how they were filtered rather than of the export
+    option.
+    """
+    v1g = S.v1g_candidates()
+    v2g = S.v2g_candidates()
+    assert v1g and v2g
+
+    # a charge-only envelope must not produce export, ever
+    assert all(o.export_energy_kwh <= 1e-9 for o in v1g)
+
+    # the V2G front is the menu a V2G-enabled customer sees, so it
+    # contains charge-only offers too: the envelope permits export, it
+    # does not compel it
+    assert any(o.export_energy_kwh <= 1e-9 for o in v2g)
+    assert any(o.export_energy_kwh > 1e-6 for o in v2g)
+
+    # selecting the same count from each keeps the comparison honest;
+    # menu length changes the load distribution on its own
+    assert len(S.select(v1g)) == len(S.select(v2g))

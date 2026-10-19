@@ -516,6 +516,46 @@ def minimum_separation(chosen: Sequence[tuple[V2GOffer, str]], spans) -> float:
     return min(pairs) if pairs else float("nan")
 
 
+V1G_ENVELOPE_SPEC = V2GEnvelope(discharge_power_kw=0.0, reserve_soc=RESERVE_SOC)
+V2G_ENVELOPE_SPEC = V2GEnvelope(
+    discharge_power_kw=7.2,
+    discharge_efficiency=DISCHARGE_EFFICIENCY,
+    reserve_soc=RESERVE_SOC,
+    session_export_allowance_kwh=15.0,
+)
+
+
+def candidates_for(envelope: V2GEnvelope, tag: str) -> list[V2GOffer]:
+    """The Pareto front for one envelope, tagged so ids stay distinct.
+
+    Compaction and the Pareto filter are applied here rather than taken
+    from ``menu.displayed`` so that a single-mode front is built exactly
+    as the pooled one is -- same tolerance, same dominance -- and the
+    three are therefore comparable.
+    """
+    menu = generate_ev_menu_v2g(**SESSION, envelope=envelope)
+    tagged = [replace(o, offer_id=f"{tag}:{o.offer_id}") for o in menu.displayed]
+    return pareto_filter(compact(tagged, merge_tolerance=MERGE_TOLERANCE_USD))
+
+
+def v1g_candidates() -> list[V2GOffer]:
+    """Front for a charge-only customer: no export permitted at all."""
+    return candidates_for(V1G_ENVELOPE_SPEC, "V1G")
+
+
+def v2g_candidates() -> list[V2GOffer]:
+    """Front for a V2G-enabled customer.
+
+    This is the menu such a customer would actually see, so it includes
+    charge-only offers: the envelope PERMITS export, it does not compel
+    it, and `E_out = 0` stays feasible throughout.  Filtering to only
+    the exporting offers would answer a different question -- what if
+    export were mandatory -- and would make the grid comparison one
+    between a free choice and a forced one.
+    """
+    return candidates_for(V2G_ENVELOPE_SPEC, "V2G")
+
+
 def pooled_candidates() -> list[V2GOffer]:
     """One candidate set spanning both modes.
 
@@ -524,18 +564,19 @@ def pooled_candidates() -> list[V2GOffer]:
     local optima -- Remark 1's nonconvexity -- so each finds offers the
     other misses.  Pooling and re-filtering costs one extra generation
     pass and is the honest way to get one menu rather than two.
+
+    For a V1G-versus-V2G grid comparison use ``v1g_candidates`` and
+    ``v2g_candidates`` instead, and select the same number of offers
+    from each: menu length changes the load distribution, so comparing
+    fronts of different sizes confounds the export option with the
+    number of rows on offer.
     """
     pool: list[V2GOffer] = []
-    for mode, envelope in (
-        ("V1G", V2GEnvelope(discharge_power_kw=0.0, reserve_soc=RESERVE_SOC)),
-        ("V2G", V2GEnvelope(
-            discharge_power_kw=7.2, discharge_efficiency=DISCHARGE_EFFICIENCY,
-            reserve_soc=RESERVE_SOC, session_export_allowance_kwh=15.0)),
-    ):
+    for tag, envelope in (("V1G", V1G_ENVELOPE_SPEC), ("V2G", V2G_ENVELOPE_SPEC)):
         menu = generate_ev_menu_v2g(**SESSION, envelope=envelope)
         # ids collide across runs; keep them distinct so dedup is by
         # attributes, not by a name two different offers happen to share.
-        pool.extend(replace(o, offer_id=f"{mode}:{o.offer_id}") for o in menu.displayed)
+        pool.extend(replace(o, offer_id=f"{tag}:{o.offer_id}") for o in menu.displayed)
     # A V2G offer can dominate a V1G one and vice versa, so the union has
     # to be re-filtered; neither input menu's Pareto front survives union.
     # merge_tolerance is NOT optional here.  Left at compact's default of
