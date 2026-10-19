@@ -36,7 +36,22 @@ from math import sqrt
 # research/ is this file's own directory, so the Phase 11 choice model
 # imports directly.  Reuse it rather than restate the conversion: the
 # pack costs are sourced and the +/-25% sensitivity band lives there.
-from choice_v2g import END_OF_LIFE_CAPACITY_LOSS
+#: End of life, as a fraction of initial capacity lost.  Wear is priced
+#: as a write-down of the WHOLE pack over the fade it survives, not of
+#: the capacity increment lost:
+#:
+#:     W = (dQ / dQ_EoL) * B_max * pi
+#:
+#: Reaching end of life costs an owner a pack, not the 20% of capacity
+#: that was lost getting there.  Preis and Biedenbach (2023) review the
+#: V2G optimisation literature and find the whole-pack form is what it
+#: uses, with 20% the standard threshold.  ``research/choice.py``, the
+#: Phase 11 V1G model, omits the divisor and so undercharges wear by
+#: exactly this factor.
+#:
+#: Lived in choice_v2g.py until that module was removed; it is a
+#: pricing assumption of the menu economics, not of any choice model.
+END_OF_LIFE_CAPACITY_LOSS = 0.20
 
 # ---------------------------------------------------------------------------
 # money basis: one currency, no FX step
