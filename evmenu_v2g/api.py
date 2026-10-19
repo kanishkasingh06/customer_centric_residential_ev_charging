@@ -257,7 +257,9 @@ def generate_ev_menu_v2g(
     # how many reached the display stage and were held back.
     displayed = [offer for offer in efficient if is_realizable(offer)]
     withheld = len(efficient) - len(displayed)
-    displayed = sorted(displayed, key=lambda o: (o.target_soc, o.ready_step, -o.saving))
+    displayed = sorted(
+        displayed, key=lambda o: (o.delivered_soc, o.ready_step, -o.saving)
+    )
     return V2GMenu(
         ev_id=ev.ev_id,
         ev_model=ev_model,
@@ -297,14 +299,19 @@ def format_menu(menu: V2GMenu) -> str:
             f" -> displayed {len(menu.displayed)}"
         ),
         "",
-        "  ready   target   saving    fade %    import   export   EFC",
+        "  ready  delivered   saving    fade %    import   export   EFC",
         "  " + "-" * 60,
     ]
     for offer in menu.displayed:
         ready = offer.ready_minute % 1440
         lines.append(
             f"  {ready // 60:02d}:{ready % 60:02d}"
-            f"   {offer.target_soc:6.0%}"
+            # delivered_soc, not target_soc: the tier is the REQUEST, and
+            # every tier beneath the arrival SOC delivers the arrival SOC
+            # instead.  Printing the request showed two offers of fifteen
+            # as "39%" when both hand back a car at 65%, which is the one
+            # number a customer acts on.
+            f"   {offer.delivered_soc:8.0%}"
             f"  {offer.saving:7.2f}"
             f"  {offer.capacity_fade * 100:8.5f}"
             f"  {offer.import_energy_kwh:7.2f}"

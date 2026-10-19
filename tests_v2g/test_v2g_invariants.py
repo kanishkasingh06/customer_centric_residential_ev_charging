@@ -16,7 +16,7 @@ from evmenu_v2g import (
     service_minimum_soc,
     throughput_fraction,
 )
-from evmenu_v2g.api import build_session_and_signal, default_tou_profile
+from evmenu_v2g.api import build_session_and_signal, default_tou_profile, format_menu
 from evmenu_v2g.menu import bau_cost_for
 from evmenu_v2g.trajectory import RequestContext, solve
 
@@ -318,3 +318,23 @@ def test_ambiguous_wrapped_export_window_is_rejected() -> None:
     for bad in ((1320, 120), (0, 2000), (1500, 1600)):
         with pytest.raises(PhysicalConstraintError):
             V2GEnvelope(discharge_power_kw=7.2, export_window=bad)
+
+
+def test_displayed_menu_shows_delivered_soc_not_the_requested_tier(menu) -> None:
+    """The SOC column a customer reads must be what they receive.
+
+    Terminal energy is pinned to ``max(zeta, z) B_max``, so every tier
+    beneath the arrival SOC delivers the arrival SOC.  format_menu
+    printed ``target_soc``, the request, which showed two offers of
+    fifteen as "39%" when both hand back a car at 65%.  Nothing
+    computed was wrong; the only number the customer acts on was.
+    """
+    rendered = format_menu(menu)
+    for offer in menu.displayed:
+        assert f"{offer.delivered_soc:8.0%}" in rendered, offer.offer_id
+    mislabelled = [
+        o for o in menu.displayed if abs(o.target_soc - o.delivered_soc) > 1e-6
+    ]
+    for offer in mislabelled:
+        # the request must NOT appear in the SOC column for these rows
+        assert f"   {offer.target_soc:8.0%}" not in rendered, offer.offer_id

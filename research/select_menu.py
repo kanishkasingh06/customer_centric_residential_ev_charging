@@ -543,7 +543,7 @@ def render(chosen: Sequence[tuple[V2GOffer, str]], universe: Sequence[V2GOffer])
           f"{'import':>7} {'export':>7}  {'mode':<4} {'oriented':<9} {'H/A/S':<14}")
     print("-" * 86)
     for offer, why in sorted(
-        chosen, key=lambda item: (item[0].target_soc, item[0].ready_minute)
+        chosen, key=lambda item: (item[0].delivered_soc, item[0].ready_minute)
     ):
         hour, minute = divmod(offer.ready_minute % 1440, 60)
         health, amenity, saving = scores[offer.offer_id]
