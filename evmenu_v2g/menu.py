@@ -74,12 +74,14 @@ class V2GOffer:
         cannot drift from the trajectory it describes.
         """
         states = self.trajectory.battery_energy_kwh
-        if not states:
-            return self.target_soc
-        capacity = max(states[0], max(states))
+        capacity = self._battery_capacity_kwh
         if capacity <= 0.0:
+            # Guard the divisor, not a different quantity: an earlier
+            # version tested max(states) and then divided by capacity,
+            # so when capacity fell back to 1.0 this returned terminal
+            # kWh presented as a fraction.
             return self.target_soc
-        return states[-1] / self._battery_capacity_kwh
+        return states[-1] / capacity
 
     @property
     def _battery_capacity_kwh(self) -> float:
@@ -247,10 +249,10 @@ def generate_offers(
     """Generate every feasible offer across the request space."""
     offers: list[V2GOffer] = []
     starts = signal.interval_start_minutes
-    for target in candidate_targets(
+    for tier_index, target in enumerate(candidate_targets(
         ev=ev, session=session, reserve_soc=envelope.reserve_soc, standard=target_tiers,
         tier_count=target_tier_count,
-    ):
+    )):
         probe = RequestContext(
             ev=ev,
             session=session,
@@ -317,7 +319,7 @@ def generate_offers(
                         # produced colliding ids, which every request with
                         # a small S^max does.
                         offer_id=(
-                            f"{ev.ev_id}-z{round(target * 100)}"
+                            f"{ev.ev_id}-z{tier_index}"
                             f"-r{ready_step}-k{index}"
                         ),
                         ready_step=ready_step,
@@ -349,10 +351,15 @@ def dominates(a: V2GOffer, b: V2GOffer, *, tol: float = 1e-9) -> bool:
     ``a > b`` iff a is sooner-or-equal, at-least-as-much SOC, at-least-as-
     much saving and at-least-as-low fade, with one strict.  The sign flip
     relative to a 0-100 health score is the point: lower fade is better.
+
+    SOC is the DELIVERED terminal state, not the requested tier.  Tiers
+    beneath the arrival SOC all deliver the arrival SOC, so comparing
+    labels makes offers that deliver the same car look different and
+    stops dominance removing them.
     """
     not_worse = (
         a.ready_step <= b.ready_step + tol
-        and a.target_soc >= b.target_soc - tol
+        and a.delivered_soc >= b.delivered_soc - tol
         and a.saving >= b.saving - tol
         and a.capacity_fade <= b.capacity_fade + tol
     )
@@ -360,7 +367,7 @@ def dominates(a: V2GOffer, b: V2GOffer, *, tol: float = 1e-9) -> bool:
         return False
     return (
         a.ready_step < b.ready_step - tol
-        or a.target_soc > b.target_soc + tol
+        or a.delivered_soc > b.delivered_soc + tol
         or a.saving > b.saving + tol
         or a.capacity_fade < b.capacity_fade - tol
     )
@@ -369,6 +376,11 @@ def dominates(a: V2GOffer, b: V2GOffer, *, tol: float = 1e-9) -> bool:
 def pareto_filter(offers: list[V2GOffer]) -> list[V2GOffer]:
     """Retain offers not dominated by any other."""
     return [a for a in offers if not any(dominates(b, a) for b in offers if b is not a)]
+
+
+def _merge_rank(offer: V2GOffer) -> tuple[bool, float]:
+    """Representative of a merged run: realizable first, then least fade."""
+    return (is_realizable(offer), -offer.capacity_fade)
 
 
 def is_realizable(offer: V2GOffer) -> bool:
@@ -391,19 +403,28 @@ def compact(offers: list[V2GOffer], *, merge_tolerance: float = 5.0) -> list[V2G
     fade: picking the overlapping trajectory as a bucket's representative
     discards a schedule that can be run in favour of one that cannot.
     """
-    buckets: dict[tuple[int, float, int], V2GOffer] = {}
+    groups: dict[tuple[int, float], list[V2GOffer]] = {}
     for offer in offers:
-        key = (
-            offer.ready_step,
-            round(offer.target_soc, 6),
-            int(offer.saving // merge_tolerance) if merge_tolerance > 0 else 0,
-        )
-        current = buckets.get(key)
-        if current is None or (
-            (is_realizable(offer), -offer.capacity_fade)
-            > (is_realizable(current), -current.capacity_fade)
-        ):
-            buckets[key] = offer
+        groups.setdefault((offer.ready_step, round(offer.target_soc, 6)), []).append(offer)
+
+    # Merge on the GAP between consecutive savings, not on a fixed grid.
+    # `int(saving // merge_tolerance)` bins against zero, so two offers a
+    # thousandth apart survive if they straddle a bin edge while two
+    # nearly a whole tolerance apart inside one bin are merged: the
+    # behaviour depends on where savings sit relative to zero rather
+    # than on how close they are to each other.
+    kept: list[V2GOffer] = []
+    for members in groups.values():
+        members.sort(key=lambda o: (o.saving, o.offer_id))
+        run: list[V2GOffer] = []
+        for offer in members:
+            if run and merge_tolerance > 0 and offer.saving - run[0].saving > merge_tolerance:
+                kept.append(max(run, key=_merge_rank))
+                run = []
+            run.append(offer)
+        if run:
+            kept.append(max(run, key=_merge_rank))
+
     return sorted(
-        buckets.values(), key=lambda o: (o.target_soc, o.ready_step, -o.saving)
+        kept, key=lambda o: (o.target_soc, o.ready_step, -o.saving)
     )

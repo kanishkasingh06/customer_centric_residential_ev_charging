@@ -57,9 +57,11 @@ from choice_v2g import END_OF_LIFE_CAPACITY_LOSS
 # responds to -- and only the level is set, to a plausible residential
 # mean.  Savings scale linearly with this, so it is a reported
 # assumption, not a hidden one.
-TARIFF_MEAN_USD_PER_KWH = 0.16          # US residential order of magnitude
+# Shape statistics of the inherited profile, used to place the mapped
+# mean without importing it (the imports sit below these constants).
 _RUPEE_TARIFF_MEAN = 5.117              # mean of default_tou_profile(30)
-TARIFF_SCALE = TARIFF_MEAN_USD_PER_KWH / _RUPEE_TARIFF_MEAN
+_RUPEE_TARIFF_MIN = 2.500
+_RUPEE_TARIFF_MAX = 10.000
 
 
 #: The saving machinery carries ABSOLUTE currency tolerances: offers are
@@ -89,7 +91,6 @@ TARIFF_SCALE = TARIFF_MEAN_USD_PER_KWH / _RUPEE_TARIFF_MEAN
 #: Below about 1.6x nothing exports at all: the spread stops covering
 #: the round-trip loss plus the fade the export costs.
 #:
-#: These endpoints give a 5.0x spread on a 0.144 USD/kWh mean.
 #: Converter efficiencies, each direction.  These and the tariff spread
 #: are not independent: export pays only where the within-session price
 #: ratio exceeds
@@ -132,9 +133,16 @@ def _tariff_usd(
 #: relabelling it: rupee-sized tolerances against dollar savings merged
 #: offers a rupee run kept apart, giving 38 displayed offers where the
 #: rupee run gave 149.
-_TOLERANCE_SCALE = (
-    (TARIFF_MIN_USD_PER_KWH + TARIFF_MAX_USD_PER_KWH) / 2.0
-) / _RUPEE_TARIFF_MEAN
+#: Scaled against the MAPPED profile's own mean, not the midpoint of the
+#: endpoints over the legacy rupee mean -- mixing those two bases put the
+#: tolerances 21% out, and bugs 1 and 3 made tolerance load-bearing.
+_MEAN_POSITION = (_RUPEE_TARIFF_MEAN - _RUPEE_TARIFF_MIN) / (
+    _RUPEE_TARIFF_MAX - _RUPEE_TARIFF_MIN
+)
+_MAPPED_TARIFF_MEAN = TARIFF_MIN_USD_PER_KWH + _MEAN_POSITION * (
+    TARIFF_MAX_USD_PER_KWH - TARIFF_MIN_USD_PER_KWH
+)
+_TOLERANCE_SCALE = _MAPPED_TARIFF_MEAN / _RUPEE_TARIFF_MEAN
 BAND_TOLERANCE_USD = 0.5 * _TOLERANCE_SCALE
 MERGE_TOLERANCE_USD = 5.0 * _TOLERANCE_SCALE
 
@@ -166,6 +174,11 @@ MENU_SIZE = 15
 #: Equal weights over the four attributes a customer actually chooses on.
 #: target_soc is already on [0, 1] so it is compared raw, as evmenu does;
 #: the other three are divided by their range across the candidate set.
+#: target is already a fraction on [0, 1] so it is compared raw rather
+#: than range-normalised; its weight therefore carries the intent that
+#: a 39%-vs-100% gap stays meaningful even on a menu whose targets are
+#: close together.  Stated here rather than hidden as a special case in
+#: _ranges, where nobody looking to change the weighting would find it.
 WEIGHTS = {"ready": 1.0, "target": 1.0, "saving": 1.0, "fade": 1.0}
 _EPSILON = 1e-12
 
@@ -227,9 +240,26 @@ LEAD_MARGIN = 0.08
 #: is ready before they leave, and scoring it that way made the amenity
 #: axis track target SOC instead, so it selected the fullest offers
 #: regardless of what they cost.
-AMENITY_DEADLINE_MINUTE = 6 * 60          # 06:00
+AMENITY_DEADLINE_MINUTE_OF_DAY = 6 * 60          # 06:00
 #: Hours past the deadline at which amenity has decayed to zero.
 AMENITY_DECAY_HOURS = 3.0
+
+
+def _deadline_absolute(offers: Sequence[V2GOffer]) -> float:
+    """The ready-by deadline on the session's ABSOLUTE clock.
+
+    Ready minutes run on a multi-day absolute clock (1200 to 1860 for a
+    20:00-07:00 session) while the deadline is a minute of day.  Taking
+    `ready_minute % 1440` to compare them wrapped every pre-midnight
+    offer to the far side of the deadline, so the twelve earliest
+    offers on the menu scored as maximally late and the amenity anchor
+    could only ever come from a post-midnight row.
+    """
+    if not offers:
+        return float(AMENITY_DEADLINE_MINUTE_OF_DAY)
+    day = min(o.ready_minute for o in offers) // 1440
+    deadline = (day + 1) * 1440 + AMENITY_DEADLINE_MINUTE_OF_DAY
+    return float(deadline)
 
 
 def saving_usd(offer: V2GOffer) -> float:
@@ -246,7 +276,11 @@ def saving_usd(offer: V2GOffer) -> float:
     return offer.saving
 
 
-def wear_rs(offer: V2GOffer) -> float:
+def wear_usd(
+    offer: V2GOffer,
+    pack_cost: float = PACK_COST_USD_PER_KWH,
+    capacity_kwh: float = KIA.usable_battery_kwh,
+) -> float:
     """Rupees of pack this session consumes, via the Phase 11 mapping.
 
     ``capacity_fade`` is ``total_capacity_fade``: the FRACTION of usable
@@ -259,12 +293,17 @@ def wear_rs(offer: V2GOffer) -> float:
     return (
         offer.capacity_fade
         / END_OF_LIFE_CAPACITY_LOSS
-        * KIA.usable_battery_kwh
-        * PACK_COST_USD_PER_KWH
+        * capacity_kwh
+        * pack_cost
     )
 
 
-def marginal_wear_rs(offer: V2GOffer, baseline_fade: float) -> float:
+def marginal_wear_usd(
+    offer: V2GOffer,
+    baseline_fade: float,
+    pack_cost: float = PACK_COST_USD_PER_KWH,
+    capacity_kwh: float = KIA.usable_battery_kwh,
+) -> float:
     """Wear attributable to CHOOSING this offer.
 
     Parked-day calendar fade happens whether or not the customer plugs
@@ -276,15 +315,15 @@ def marginal_wear_rs(offer: V2GOffer, baseline_fade: float) -> float:
     return (
         max(0.0, offer.capacity_fade - baseline_fade)
         / END_OF_LIFE_CAPACITY_LOSS
-        * KIA.usable_battery_kwh
-        * PACK_COST_USD_PER_KWH
+        * capacity_kwh
+        * pack_cost
     )
 
 
 def _attributes(offer: V2GOffer) -> tuple[float, float, float, float]:
     return (
         float(offer.ready_minute),
-        float(offer.target_soc),
+        offer.delivered_soc,
         saving_usd(offer),
         float(offer.capacity_fade),
     )
@@ -338,7 +377,7 @@ def orientation_scores(
     # for most of the menu -- it took four labels to savings' one.
     raw_amenity = {}
     for offer in offers:
-        minutes_late = (offer.ready_minute % 1440) - AMENITY_DEADLINE_MINUTE
+        minutes_late = offer.ready_minute - _deadline_absolute(offers)
         punctuality = (
             1.0 if minutes_late <= 0.0
             else max(0.0, 1.0 - minutes_late / (AMENITY_DECAY_HOURS * 60.0))
@@ -381,7 +420,7 @@ def intent_anchors(
     floor = min(o.capacity_fade for o in offers) if baseline_fade is None else baseline_fade
 
     def net(offer: V2GOffer) -> float:
-        return saving_usd(offer) - marginal_wear_rs(offer, floor)
+        return saving_usd(offer) - marginal_wear_usd(offer, floor)
 
     # An offer that destroys value should never REPRESENT an intent, even
     # if it is the extreme point on that axis.  Without this the amenity
@@ -402,7 +441,7 @@ def intent_anchors(
     take(max(worthwhile, key=lambda o: (net(o), -o.capacity_fade, o.offer_id)), "savings")
     on_time = [
         o for o in worthwhile
-        if (o.ready_minute % 1440) <= AMENITY_DEADLINE_MINUTE
+        if o.ready_minute <= _deadline_absolute(worthwhile)
     ] or worthwhile
     take(max(on_time, key=lambda o: (o.target_soc, net(o), o.offer_id)), "amenity")
     return anchors
@@ -466,7 +505,13 @@ def pooled_candidates() -> list[V2GOffer]:
         pool.extend(replace(o, offer_id=f"{mode}:{o.offer_id}") for o in menu.displayed)
     # A V2G offer can dominate a V1G one and vice versa, so the union has
     # to be re-filtered; neither input menu's Pareto front survives union.
-    return pareto_filter(compact(pool))
+    # merge_tolerance is NOT optional here.  Left at compact's default of
+    # 5.0 against savings spanning 0 to 4.3 it puts the whole menu in one
+    # bucket, degrading compaction to "keep one offer per (ready, target)"
+    # -- which keeps the lowest-fade row, almost always the one exporting
+    # least.  Measured: 177 pooled offers give a 49-offer front with 7 V2G
+    # rows at the default, against 116 and 74 at the intended tolerance.
+    return pareto_filter(compact(pool, merge_tolerance=MERGE_TOLERANCE_USD))
 
 
 def render(chosen: Sequence[tuple[V2GOffer, str]], universe: Sequence[V2GOffer]) -> None:
@@ -485,7 +530,7 @@ def render(chosen: Sequence[tuple[V2GOffer, str]], universe: Sequence[V2GOffer])
         hour, minute = divmod(offer.ready_minute % 1440, 60)
         health, amenity, saving = scores[offer.offer_id]
         mode = "V2G" if offer.export_energy_kwh > 1e-6 else "V1G"
-        wear = marginal_wear_rs(offer, baseline)
+        wear = marginal_wear_usd(offer, baseline)
         print(f"{hour:02d}:{minute:02d}   {offer.delivered_soc:6.0%} "
               f"{saving_usd(offer):8.2f} "
               f"{wear:8.2f} {saving_usd(offer) - wear:8.2f} "
@@ -500,13 +545,13 @@ def render(chosen: Sequence[tuple[V2GOffer, str]], universe: Sequence[V2GOffer])
     print("\n  orientation mix: " + ", ".join(
         f"{k} {v}" for k, v in sorted(counts.items())))
     negative = sum(
-        1 for o, _ in chosen if saving_usd(o) - marginal_wear_rs(o, baseline) < 0
+        1 for o, _ in chosen if saving_usd(o) - marginal_wear_usd(o, baseline) < 0
     )
     print(f"  modes: V1G {len(chosen) - v2g}, V2G {v2g};"
           f" {negative} offer(s) net-negative")
     print(f"  minimum pairwise separation: {minimum_separation(chosen, spans):.4f}")
     print(f"  battery = marginal pack spend vs the least-fade row "
-          f"(${wear_rs(min(universe, key=lambda o: o.capacity_fade)):.2f} absolute), "
+          f"(${wear_usd(min(universe, key=lambda o: o.capacity_fade)):.2f} absolute), "
           f"at ${PACK_COST_USD_PER_KWH:,.0f}/kWh residual basis "
           f"({KIA.chemistry}); net = saving - battery, all USD")
 
