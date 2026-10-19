@@ -174,11 +174,14 @@ MENU_SIZE = 15
 #: Equal weights over the four attributes a customer actually chooses on.
 #: target_soc is already on [0, 1] so it is compared raw, as evmenu does;
 #: the other three are divided by their range across the candidate set.
-#: target is already a fraction on [0, 1] so it is compared raw rather
-#: than range-normalised; its weight therefore carries the intent that
-#: a 39%-vs-100% gap stays meaningful even on a menu whose targets are
-#: close together.  Stated here rather than hidden as a special case in
-#: _ranges, where nobody looking to change the weighting would find it.
+#: Relative weights on the four distance axes.  Note that these are NOT
+#: the whole story: `_ranges` divides three axes by their observed range
+#: and leaves the target axis raw, so target carries more weight than a
+#: value of 1.0 here suggests.  That special case cannot move into this
+#: dict -- raw comparison means dividing by one, which expressed as a
+#: weight would be the square of the menu's target range and so would
+#: change with every menu.  Change the behaviour in `_ranges`; this dict
+#: only scales it.
 WEIGHTS = {"ready": 1.0, "target": 1.0, "saving": 1.0, "fade": 1.0}
 _EPSILON = 1e-12
 
@@ -254,6 +257,13 @@ def _deadline_absolute(offers: Sequence[V2GOffer]) -> float:
     offer to the far side of the deadline, so the twelve earliest
     offers on the menu scored as maximally late and the amenity anchor
     could only ever come from a post-midnight row.
+
+    Known limitation: the deadline day is inferred from the earliest
+    ready minute, which is right for an overnight session and wrong for
+    a same-day one -- an 08:00-18:00 session would put the deadline at
+    06:00 the following morning and score every offer punctual.  The
+    deadline should come from the session's declared departure.  Latent
+    while every worked session is overnight.
     """
     if not offers:
         return float(AMENITY_DEADLINE_MINUTE_OF_DAY)
@@ -281,13 +291,13 @@ def wear_usd(
     pack_cost: float = PACK_COST_USD_PER_KWH,
     capacity_kwh: float = KIA.usable_battery_kwh,
 ) -> float:
-    """Rupees of pack this session consumes, via the Phase 11 mapping.
+    """Dollars of pack life this session consumes, via the Phase 11 mapping.
 
     ``capacity_fade`` is ``total_capacity_fade``: the FRACTION of usable
     capacity spent, so 3.95e-5 is 0.00395% of the pack, not 0.00395.
     Multiplying by capacity and pack cost puts battery wear in the same
     unit as the bill, which is the whole point -- it is what let the
-    choice model weigh a rupee of pack against a rupee of electricity,
+    choice model weigh a dollar of pack against a dollar of electricity,
     and it is the only form of "health" a customer can act on.
     """
     return (
@@ -332,8 +342,15 @@ def _attributes(offer: V2GOffer) -> tuple[float, float, float, float]:
 def _ranges(universe: Sequence[V2GOffer]) -> tuple[float, float, float, float]:
     columns = list(zip(*(_attributes(o) for o in universe), strict=True))
     spans = [max(col) - min(col) for col in columns]
-    # target_soc is already a fraction; comparing it raw keeps a 39% vs 100%
-    # gap meaningful even when every displayed offer shares a target.
+    # Delivered SOC is already a fraction, so it is compared raw while
+    # the other three are divided by their observed range.  This keeps a
+    # 65%-vs-100% gap meaningful on a menu whose targets cluster, at the
+    # cost of giving the axis more weight than WEIGHTS["target"] implies
+    # -- on the worked menu the target range is 0.35, so raw comparison
+    # weights it about 2.9x what range-normalising would.  Measured: the
+    # choice changes nothing on this menu, same separation and the same
+    # offers selected, so it is a stated preference rather than a tuned
+    # one.
     spans[1] = 1.0
     return tuple(max(s, _EPSILON) for s in spans)  # type: ignore[return-value]
 
@@ -365,7 +382,7 @@ def orientation_scores(
     """
     fades = [o.capacity_fade for o in offers]
     savings = [saving_usd(o) for o in offers]
-    targets = [o.target_soc for o in offers]
+    targets = [o.delivered_soc for o in offers]
 
     def unit(value: float, column: Sequence[float]) -> float:
         low, high = min(column), max(column)
@@ -375,15 +392,16 @@ def orientation_scores(
     # two.  Punctuality saturates at 1 for anything meeting the deadline,
     # so without rescaling the axis sits in [0.5, 1] and wins the argmax
     # for most of the menu -- it took four labels to savings' one.
+    deadline = _deadline_absolute(offers)
     raw_amenity = {}
     for offer in offers:
-        minutes_late = offer.ready_minute - _deadline_absolute(offers)
+        minutes_late = offer.ready_minute - deadline
         punctuality = (
             1.0 if minutes_late <= 0.0
             else max(0.0, 1.0 - minutes_late / (AMENITY_DECAY_HOURS * 60.0))
         )
         raw_amenity[offer.offer_id] = 0.5 * punctuality + 0.5 * unit(
-            offer.target_soc, targets
+            offer.delivered_soc, targets
         )
     amenity_column = list(raw_amenity.values())
 
@@ -443,7 +461,7 @@ def intent_anchors(
         o for o in worthwhile
         if o.ready_minute <= _deadline_absolute(worthwhile)
     ] or worthwhile
-    take(max(on_time, key=lambda o: (o.target_soc, net(o), o.offer_id)), "amenity")
+    take(max(on_time, key=lambda o: (o.delivered_soc, net(o), o.offer_id)), "amenity")
     return anchors
 
 

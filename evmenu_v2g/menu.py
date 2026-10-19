@@ -396,18 +396,32 @@ def is_realizable(offer: V2GOffer) -> bool:
     return offer.simultaneous_periods == 0
 
 
-def compact(offers: list[V2GOffer], *, merge_tolerance: float = 5.0) -> list[V2GOffer]:
+def compact(offers: list[V2GOffer], *, merge_tolerance: float) -> list[V2GOffer]:
     """Within each (ready, target) group, keep the lowest-fade offer per band.
 
     A realizable offer beats an unrealizable one outright, whatever the
     fade: picking the overlapping trajectory as a bucket's representative
     discards a schedule that can be run in favour of one that cannot.
+
+    ``merge_tolerance`` is required, with no default.  It is an absolute
+    currency amount, so a default silently becomes wrong the moment the
+    currency or the tariff level changes -- which is how a caller came
+    to use 5.0 against savings spanning 0 to 4.3 and discard
+    nine-tenths of the front.
+
+    Known gap: merging happens only WITHIN a ``(ready_step, target)``
+    group, so near-duplicates at adjacent ready steps are invisible to
+    it.  Harmless on a small front; at 108 offers it leaves pairs an
+    hour and a cent apart competing for menu slots.
     """
     groups: dict[tuple[int, float], list[V2GOffer]] = {}
     for offer in offers:
-        groups.setdefault((offer.ready_step, round(offer.target_soc, 6)), []).append(offer)
+        groups.setdefault((offer.ready_step, round(offer.delivered_soc, 6)), []).append(offer)
 
-    # Merge on the GAP between consecutive savings, not on a fixed grid.
+    # Merge on distance from the RUN ANCHOR, not on a fixed grid and not
+    # on the gap between consecutive offers.  Consecutive-gap merging
+    # chains transitively and can produce a run far wider than the
+    # tolerance; anchoring bounds each run at `merge_tolerance` wide.
     # `int(saving // merge_tolerance)` bins against zero, so two offers a
     # thousandth apart survive if they straddle a bin edge while two
     # nearly a whole tolerance apart inside one bin are merged: the
@@ -426,5 +440,5 @@ def compact(offers: list[V2GOffer], *, merge_tolerance: float = 5.0) -> list[V2G
             kept.append(max(run, key=_merge_rank))
 
     return sorted(
-        kept, key=lambda o: (o.target_soc, o.ready_step, -o.saving)
+        kept, key=lambda o: (o.delivered_soc, o.ready_step, -o.saving)
     )
