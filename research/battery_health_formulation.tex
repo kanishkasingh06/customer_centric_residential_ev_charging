@@ -374,6 +374,93 @@ value; in the worked menu of Section~\ref{sec:verification} two of
 fifteen displayed offers are negative, which is not visible when the
 health column reports a raw fade fraction.
 
+\section{Service life, without a price}
+\label{sec:servicelife}
+
+Everything in Section~3 depends on $\pi_{\mathrm{chem}}$, which
+Section~\ref{sec:unresolved} identifies as the largest uncertainty in
+the model. The same fade figures can be presented without it, by
+asking how long the pack lasts if a given session is repeated daily.
+
+Let $\dQ^{\mathrm{cal}}$ and $\dQ^{\mathrm{cyc}}$ be one session's
+calendar and cycle fade, and $\Delta N$ its equivalent full cycles.
+Repeating it daily for $T$ years, both mechanisms decelerate under
+their own power laws, so the cumulative loss is
+%
+\begin{equation}
+Q(T) \;=\;
+  \underbrace{365\,\dQ^{\mathrm{cal}}\,\frac{T^{\alpha}}{\alpha}}_{\text{calendar}}
+  \;+\;
+  \underbrace{k_{\mathrm{cyc}}\,\bigl(365\,\Delta N\,T\bigr)^{\beta}}_{\text{cycle}},
+\label{eq:servicelife}
+\end{equation}
+%
+and service life is the $T$ solving $Q(T) = 0.20$.
+
+Integrating matters. Dividing \SI{20}{\percent} by the daily rate
+treats both mechanisms as linear and understates life by about
+\SI{45}{\percent} on the worked menu --- \num{5.6} years against
+\num{9.4} for its heaviest offer. The daily rate is a derivative, not
+an average.
+
+\begin{table}[htbp]
+\centering
+\caption{Service life for each offer of the worked menu, repeated
+daily. Delivered SOC, not the requested tier. The \SI{20}{\percent}
+threshold is the convention of \eqref{eq:wear}'s end-of-life divisor.}
+\begin{tabular}{llrrrr}
+\toprule
+Ready & Delivered & Export (\si{\kilo\watt\hour}) & $\dQ^{\mathrm{cyc}}$ & EFC/day & Years \\
+\midrule
+20:00 & \SI{65}{\percent}  &  0.0 & \num{0}         & \num{0.000} & \num{29.7} \\
+07:00 & \SI{65}{\percent}  &  1.9 & \num{1.16e-06}  & \num{0.025} & \num{29.9} \\
+23:30 & \SI{65}{\percent}  &  6.9 & \num{5.20e-06}  & \num{0.094} & \num{29.5} \\
+03:30 & \SI{71}{\percent}  &  0.0 & \num{1.63e-06}  & \num{0.029} & \num{27.1} \\
+07:00 & \SI{77}{\percent}  &  4.6 & \num{9.20e-06}  & \num{0.121} & \num{23.7} \\
+01:00 & \SI{82}{\percent}  &  0.0 & \num{7.76e-06}  & \num{0.087} & \num{21.4} \\
+04:00 & \SI{77}{\percent}  & 14.6 & \num{2.48e-05}  & \num{0.255} & \num{18.7} \\
+23:00 & \SI{88}{\percent}  &  0.0 & \num{1.37e-05}  & \num{0.117} & \num{18.0} \\
+06:00 & \SI{100}{\percent} &  0.0 & \num{2.12e-05}  & \num{0.175} & \num{15.4} \\
+02:00 & \SI{94}{\percent}  &  4.6 & \num{2.76e-05}  & \num{0.208} & \num{14.4} \\
+07:00 & \SI{88}{\percent}  & 14.4 & \num{3.68e-05}  & \num{0.311} & \num{13.9} \\
+01:00 & \SI{100}{\percent} &  0.0 & \num{2.70e-05}  & \num{0.175} & \num{13.5} \\
+00:00 & \SI{100}{\percent} &  0.0 & \num{2.83e-05}  & \num{0.175} & \num{13.2} \\
+03:30 & \SI{100}{\percent} &  8.5 & \num{4.36e-05}  & \num{0.290} & \num{10.9} \\
+07:00 & \SI{100}{\percent} & 14.4 & \num{5.42e-05}  & \num{0.369} & \num{9.4} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three readings follow, and the second is the one that matters for V2G.
+
+The spread is \num{9.4} to \num{29.9} years for the same car on the
+same menu, a factor of three decided entirely by which offer is taken.
+
+\emph{Export is not what shortens service life; charging to full is.}
+The offer at \SI{77}{\percent} exporting \SI{14.6}{\kilo\watt\hour}
+lasts \num{18.7} years, against \num{13.5} for a charge-only offer
+delivering \SI{100}{\percent}. The heaviest exporter on the menu
+cycles \SI{78}{\percent} more per day than that charge-only offer and
+still lasts marginally longer, because it holds a lower state of
+charge overnight and the calendar terms are two thirds of the total.
+Every one of the three shortest-lived offers delivers
+\SI{100}{\percent}, and two of them export nothing at all.
+
+Exporting \SI{6.9}{\kilo\watt\hour} nightly costs about two months of
+pack life over thirty years: \num{29.5} years against \num{29.7} for
+declining to charge.
+
+\paragraph{What this does and does not remove.}
+It removes $\pi_{\mathrm{chem}}$, and with it the largest single
+uncertainty in any monetary figure here. It does not remove the
+cycle-coefficient uncertainty of
+Section~\ref{sec:unresolved}: these years inherit a parameterisation
+whose implied cost per unit throughput sits two to four times above
+the published band of~\cite{preis2023}, so they are conservative and
+the true figures are probably longer. Ratios between rows are more
+trustworthy than levels. Nor does it remove the end-of-life
+convention --- \SI{20}{\percent} is a threshold, not a failure.
+
 \section{Parameters}
 \label{sec:parameters}
 
