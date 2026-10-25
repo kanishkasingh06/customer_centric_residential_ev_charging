@@ -8,7 +8,6 @@
 \usepackage[hidelinks]{hyperref}
 
 \sisetup{group-separator={,},group-minimum-digits=4}
-\DeclareSIUnit{\rupee}{Rs}
 \DeclareSIUnit{\USD}{\$}
 \DeclareSIUnit{\yr}{yr}
 \DeclareSIUnit{\euro}{EUR}
@@ -22,7 +21,7 @@
 \newcommand{\etaout}{\eta^{\mathrm{out}}}
 
 \title{Battery Health in the Customer Menu:\\
-Session Capacity Fade and its Monetary Equivalent}
+Session Capacity Fade and Service Life}
 \author{}
 \date{}
 
@@ -34,14 +33,14 @@ Session Capacity Fade and its Monetary Equivalent}
 This note states the battery-health component of the residential EV
 charging menu: the semi-empirical capacity-fade model evaluated for one
 connected session, its bidirectional (V2G) extension, and the mapping
-from fade to rupees that makes health commensurable with the electricity
-bill. Equations are numbered independently; where they correspond to the
+to service life, which expresses health in years rather than in a
+price nobody can pin down. Equations are numbered independently; where they correspond to the
 NPSC manuscript this is noted. Every numerical claim in
 Section~\ref{sec:verification} was re-derived from the parameter table
 alone and agrees with the implementation to \num{1.4e-20}. Parameter
 provenance and its limits are stated in Section~\ref{sec:provenance};
 these are literature-anchor calibrations, not fitted coefficients, and
-the monetary conversion rests on a single exogenous assumption.
+the service lives they produce are lower bounds.
 \end{abstract}
 
 \section{Session fade}
@@ -307,80 +306,21 @@ claim is modest --- moving a pack from \SI{65}{\percent} to
 offset by the cycle fade the export itself incurs, so no headline
 claim that V2G improves battery health follows either way.
 
-\section{Monetary equivalent}
-\subsection{Pricing a session}
-
-The menu offers four attributes to a customer who must trade battery
-wear against the electricity bill. A normalised health index does not
-support that trade; a price does. Since $\dQ$ is the \emph{fraction} of
-usable capacity consumed, multiplying by capacity and pack cost gives
-rupees of battery spent:
-%
-\begin{equation}
-W \;=\; \dQ \,\cdot\, \Bmax \,\cdot\, \pi_{\mathrm{chem}},
-\label{eq:wear}
-\end{equation}
-%
-with $\pi_{\mathrm{chem}}$ the chemistry-specific pack cost in
-\si{\rupee\per\kilo\watt\hour}. Wear and bill are then in the same unit,
-and the only free quantity in the choice model is their ratio: how much
-of a rupee of consumed pack a customer treats as a rupee out of pocket.
-
-\subsection{What to display}
-
-Equation~\eqref{eq:wear} prices the whole session, which is the correct
-quantity for the choice model and the wrong one to put in front of a
-customer. The reason is that a large part of $W$ is incurred whichever
-offer is taken. The parked-day term \eqref{eq:calpark} depends only on
-the delivered state of charge and the trip, so it accrues even when the
-customer declines to charge altogether; in the worked example of
-Section~\ref{sec:verification} it is the largest of the three
-components, at \SI{43}{\percent} of total fade. A customer comparing two
-rows of a menu is choosing between them, not between charging and
-owning a battery, so the figure shown against an offer should be the
-wear its selection \emph{adds}.
-
-Let $\dQ_0$ be the smallest total fade among the offers of one menu. In
-practice the minimiser is the decline-to-charge option, so $\dQ_0$ is
-the fade the customer incurs by doing nothing. For an offer of fade
-$\dQ$ and saving $S$, define
-%
-\begin{equation}
-W^{\mathrm{marg}} \;=\; \bigl(\dQ - \dQ_0\bigr)\Bmax\,\pi_{\mathrm{chem}},
-\qquad
-\mathrm{Net} \;=\; S - W^{\mathrm{marg}}.
-\label{eq:net}
-\end{equation}
-%
-$W^{\mathrm{marg}}$ is the pack spend attributable to the decision and
-$\mathrm{Net}$ is what the offer is worth once that spend is paid for.
-Three properties of \eqref{eq:net} should travel with any figure
-computed from it.
-
-It is a presentation convention, not part of the model. The choice
-model uses absolute $W$ from \eqref{eq:wear}. Within one request the two
-differ by the constant $\dQ_0 \Bmax \pi_{\mathrm{chem}}$, which cancels
-in a logit and so leaves choice probabilities unchanged; across requests
-it does not cancel, and the two conventions must not be mixed.
-
-$\dQ_0$ is a property of the menu, not of the vehicle. Regenerate the
-menu with a different tier ladder and $\dQ_0$ moves, so
-$\mathrm{Net}$ ranks offers within one menu and is not comparable
-across menus or across sessions.
-
-$\mathrm{Net}$ can be negative, and this is the point of computing it.
-An offer whose saving is smaller than the pack it consumes destroys
-value; in the worked menu of Section~\ref{sec:verification} two of
-fifteen displayed offers are negative, which is not visible when the
-health column reports a raw fade fraction.
-
 \section{Service life, without a price}
 \label{sec:servicelife}
 
-Everything in Section~3 depends on $\pi_{\mathrm{chem}}$, which
-Section~\ref{sec:unresolved} identifies as the largest uncertainty in
-the model. The same fade figures can be presented without it, by
-asking how long the pack lasts if a given session is repeated daily.
+Capacity fade can be priced -- multiply $\dQ$ by capacity and a pack
+cost to get money of battery spent -- and an earlier version of this
+note did exactly that. The approach is abandoned here. The pack cost
+is the single largest uncertainty in the whole model, spanning an
+order of magnitude between a used-pack residual value and a new-pack
+price (Section~\ref{sec:unresolved}), and a figure that uncertain
+should not sit in front of a customer or a referee.
+
+Every result the money gave is available without it, by asking how
+long the pack lasts if a given session is repeated daily. That
+question needs no price, no end-of-life cost convention and no
+baseline subtraction.
 
 Let $\dQ^{\mathrm{cal}}$ and $\dQ^{\mathrm{cyc}}$ be one session's
 calendar and cycle fade, and $\Delta N$ its equivalent full cycles.
@@ -407,7 +347,8 @@ an average.
 \centering
 \caption{Service life for each offer of the worked menu, repeated
 daily. Delivered SOC, not the requested tier. The \SI{20}{\percent}
-threshold is the convention of \eqref{eq:wear}'s end-of-life divisor.}
+threshold is the usual end-of-life convention for automotive packs;
+it is a threshold, not a failure.}
 \begin{tabular}{llrrrr}
 \toprule
 Ready & Delivered & Export (\si{\kilo\watt\hour}) & $\dQ^{\mathrm{cyc}}$ & EFC/day & Years \\
@@ -451,8 +392,12 @@ pack life over thirty years: \num{29.5} years against \num{29.7} for
 declining to charge.
 
 \paragraph{What this does and does not remove.}
-It removes $\pi_{\mathrm{chem}}$, and with it the largest single
-uncertainty in any monetary figure here. It does not remove the
+It removes the pack cost, and with it the largest single uncertainty
+in the model. It also removes the baseline question: a service life is
+an absolute quantity, where a priced figure had to be stated either
+against the whole session or against some reference offer, and mixing
+those two conventions was a live defect in an earlier version. It does
+not remove the
 cycle-coefficient uncertainty of
 Section~\ref{sec:unresolved}: these years inherit a parameterisation
 whose implied cost per unit throughput sits two to four times above
@@ -506,7 +451,7 @@ $\beta$            & throughput exponent           & \num{0.50}       & \num{0.5
 $t_{0}$ & calendar anchor age            & \multicolumn{2}{c}{\SI{1}{\yr}} \\
 $H_{\mathrm{park}}$& parked hours per day          & \multicolumn{2}{c}{\num{16}} \\
 $N^{\min}$         & cycle-slope regularisation    & \multicolumn{2}{c}{\num{1}} \\
-$\pi_{\mathrm{chem}}$ & pack cost (\si{\rupee\per\kilo\watt\hour}) & \num{7850} & \num{12400} \\
+End of life        & capacity lost at end of life  & \multicolumn{2}{c}{\SI{20}{\percent}} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -524,8 +469,8 @@ accumulated EFC, at \SI{25}{\celsius}; connected \num{20}:\num{00} to
 \sigma(500) = 0.5 \cdot 500^{-0.5} = \num{0.022360680}.
 \]
 %
-For the highest-saving offer on the menu (target \SI{94}{\percent},
-$S = \SI{143.32}{\rupee}$):
+For the highest-throughput offer of the worked menu
+(\SI{100}{\percent} delivered, \SI{14.4}{\kilo\watt\hour} exported):
 
 \begin{table}[htbp]
 \centering
@@ -543,16 +488,10 @@ $\dQ$ (total)             & \num{6.953417e-5} & \SI{0.00695}{\percent} of pack \
 \end{table}
 
 \noindent
-Applying \eqref{eq:wear} and \eqref{eq:net} with $\dQ_0 =
-\num{3.952973e-5}$:
-%
-\[
-W = \num{6.953417e-5}\cdot 78 \cdot \num{12400} = \SI{67.25}{\rupee},
-\qquad
-W^{\mathrm{marg}} = \SI{29.02}{\rupee},
-\qquad
-\mathrm{Net} = \SI{114.30}{\rupee}.
-\]
+Repeating this session daily, \eqref{eq:servicelife} gives a service
+life of \num{9.4} years to \SI{80}{\percent} capacity. It is the
+shortest-lived offer of the worked menu, and the longest is
+\num{29.9} years.
 
 \paragraph{Verification.}
 All \num{114} Pareto-efficient offers of this menu were re-derived from
@@ -562,22 +501,12 @@ absolute disagreement against the reported values: \num{1.016e-20} on
 $\dQ^{\mathrm{cal,win}}$, exactly zero on $\dQ^{\mathrm{cal,park}}$ and
 $\dQ^{\mathrm{cyc}}$, and \num{1.355e-20} on the total.
 
-\paragraph{Sensitivity to the pack cost.}
-$W^{\mathrm{marg}}$ and Net are linear in $\pi_{\mathrm{chem}}$:
-
-\begin{table}[htbp]
-\centering
-\begin{tabular}{lrrr}
-\toprule
-Scenario & $\pi_{\mathrm{NMC}}$ (\si{\rupee\per\kilo\watt\hour}) & $W^{\mathrm{marg}}$ & Net \\
-\midrule
-$0.75\times$           & \num{9300}  & \SI{21.77}{\rupee} & \SI{121.55}{\rupee} \\
-baseline               & \num{12400} & \SI{29.02}{\rupee} & \SI{114.30}{\rupee} \\
-$1.25\times$           & \num{15500} & \SI{36.28}{\rupee} & \SI{107.04}{\rupee} \\
-BEV-pack average       & \num{9584}  & \SI{22.43}{\rupee} & \SI{120.89}{\rupee} \\
-\bottomrule
-\end{tabular}
-\end{table}
+\paragraph{Sensitivity.}
+Service life depends on the cycle and calendar coefficients but on no
+price. The remaining parameter uncertainty is therefore the one in
+Section~\ref{sec:unresolved}: the cycle coefficient implies a cost per
+unit throughput two to four times the published band
+of~\cite{preis2023}, so these lives are conservative.
 
 \section{Provenance and limitations}
 \label{sec:provenance}
@@ -692,53 +621,25 @@ compare \emph{offer rankings} rather than absolute fade.
 Collected here rather than scattered, in rough order of how much they
 could move a result.
 
-\paragraph{1. The costing convention undercharges, and the price
-behind it is the wrong kind of price.}
-Two separable problems.
+\paragraph{1. The cycle coefficient ages the pack too fast.}
+Service life replaces the priced figure, so the pack cost no longer
+enters this model and the order-of-magnitude uncertainty it carried is
+gone with it. What remains is the fade model itself, and it is
+pessimistic. Converting this parameterisation to a cost per unit
+throughput for comparison, the worked menu's heaviest offer implies
+two to four times the \SIrange{0.23}{0.45}{\eurocent\per\kilo\watt\hour}
+that Preis and Biedenbach~\cite{preis2023} report for V2G
+optimisation, and an end of life near \num{1500} equivalent full
+cycles where \numrange{2000}{3000} is typical for NMC. Every service
+life quoted here is therefore a lower bound, and ratios between offers
+are more trustworthy than levels.
 
-\emph{Convention.} Equation~\eqref{eq:wear} prices the \emph{fraction
-of capacity lost}. The V2G optimisation literature instead writes the
-\emph{whole pack off} over the throughput it survives: Preis and
-Biedenbach~\cite{preis2023} review the field and find two usable
-forms, a weighted Ah-throughput model with a constant cost factor
-$\mathrm{CF} = \pi B^{\max} / E^{\mathrm{EoL}}$ and a performance-based
-piecewise model, with end of life at \SI{20}{\percent} capacity loss.
-At equal fade the two conventions differ by exactly that threshold:
-\eqref{eq:wear} charges \num{0.2} of what the throughput form charges,
-because reaching end of life costs the owner a pack, not a fifth of
-one. On that axis this formulation \emph{under}charges fivefold.
-
-\emph{Price.} $\pi_{\mathrm{chem}}$ is an OEM procurement price for new
-capacity with no end-of-life divisor in it. What an owner loses is
-retail replacement, which carries labour, margin and tax; or
-resale-value loss, since capacity is realised in money only at
-replacement or sale and not in arbitrarily small increments; or, inside
-an \num{8}-year warranty, close to nothing at the margin.
-Hein et al.~\cite{hein2012} model the residual value of used EV packs
-endogenously and obtain roughly \SI{18}{\euro\per\kilo\watt\hour},
-an order of magnitude under new-capacity price.
-
-\emph{Net effect, measured.} For the highest-saving offer of the worked
-menu (\SI{53.7}{\kilo\watt\hour} battery-side throughput), this
-formulation gives \SI{1.57}{\rupee\per\kilo\watt\hour} of throughput
-against the \SIrange{0.24}{0.47}{\rupee\per\kilo\watt\hour} implied by
-\cite{preis2023}'s published \SIrange{0.23}{0.45}{\eurocent\per\kilo\watt\hour}.
-So the two errors run opposite ways and do not cancel: the convention
-is fivefold low, while the fade model is fast enough to more than
-offset it --- its cycle term implies end of life at about \num{1500}
-equivalent full cycles, which is pessimistic for NMC. The figures here
-land three to six times above the published band.
-
-\emph{What would fix it.} Restate $W$ as
-$\mathrm{CF}\cdot Q$ with $\mathrm{CF}$ derived through an explicit
-end-of-life divisor, and calibrate against~\cite{preis2023} rather than
-against a pack price alone. Their methodological finding also bears on
-the choice: the constant-factor form is the better optimisation
-formulation, because the state-of-health-dependent piecewise model
-moves average degradation cost \emph{by a factor of \num{9.71}} when
-initial SoH shifts from \SI{95}{\percent} to \SI{100}{\percent}. This
-formulation already uses a constant factor, which is the right side of
-that result.
+Should a priced figure ever be wanted again, the literature form is a
+write-down of the whole pack over the throughput it survives,
+$\mathrm{CF} = \pi B^{\max} / E^{\mathrm{EoL}}$, not of the capacity
+increment lost; and $\pi$ should be a used-pack residual value, which
+Hein et al.~\cite{hein2012} model at roughly
+\SI{18}{\euro\per\kilo\watt\hour}, rather than a new-pack price.
 
 \paragraph{2. Shallow-cycle fade is substantially \emph{reversible},
 and V2G sits in exactly that region.}
