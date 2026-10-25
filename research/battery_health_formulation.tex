@@ -30,11 +30,14 @@ Session Capacity Fade and Service Life}
 
 \begin{abstract}
 \noindent
-This note states the battery-health component of the residential EV
-charging menu: the semi-empirical capacity-fade model evaluated for one
+This note states the battery-health input to the residential EV
+charging menu: a semi-empirical capacity-fade model evaluated for one
 connected session, its bidirectional (V2G) extension, and the mapping
 to service life, which expresses health in years rather than in a
-price nobody can pin down. Equations are numbered independently; where they correspond to the
+price nobody can pin down. The fade model is an input and not the
+contribution; Section~\ref{sec:interface} states the four quantities
+a substitute must supply, and separates the conclusions robust to the
+parameterisation from those conditional on it. Equations are numbered independently; where they correspond to the
 NPSC manuscript this is noted. Every numerical claim in
 Section~\ref{sec:verification} was re-derived from the parameter table
 alone and agrees with the implementation to \num{1.4e-20}. Parameter
@@ -42,6 +45,53 @@ provenance and its limits are stated in Section~\ref{sec:provenance};
 these are literature-anchor calibrations, not fitted coefficients, and
 the service lives they produce are lower bounds.
 \end{abstract}
+
+\section{What this note is, and is not}
+\label{sec:interface}
+
+The contribution of the wider work is the \emph{menu}: a customer is
+offered a small set of priced, health-labelled charging schedules and
+chooses among them, and that produces different feeder behaviour from
+either uncontrolled charging or a deterministic optimiser. The fade
+model below is an input to that, not the claim. It is one defensible
+instantiation, and a better one should replace it when available.
+
+What makes it replaceable is that everything downstream consumes only
+four quantities per candidate schedule:
+%
+\begin{equation}
+\bigl(\;
+\dQ^{\mathrm{cal,win}},\;
+\dQ^{\mathrm{cal,park}},\;
+\dQ^{\mathrm{cyc}},\;
+\Delta N
+\;\bigr),
+\label{eq:interface}
+\end{equation}
+%
+the three fade components as fractions of usable capacity and the
+equivalent-full-cycle increment. Dominance filtering, compaction,
+diversity selection and the service-life column read nothing else
+about degradation. A substitute model supplying \eqref{eq:interface}
+drops in without touching the menu machinery.
+
+\paragraph{Which conclusions survive a change of model.}
+Worth separating, because the two sets carry different weight.
+
+Robust to the parameterisation: that export does not shorten service
+life while charging to full does, which follows from the calendar
+terms being about two thirds of total fade and rising with state of
+charge, a feature of every published parameterisation examined here;
+and that whether V2G is viable at all is a tariff-design question,
+settled by whether the price ratio available within the connected
+session exceeds $(1/\etain\etaout)/\sigma^{\mathrm{sell}}$, which
+contains no fade model at all.
+
+Conditional on it: the absolute service lives, the
+\numrange{9.4}{29.9}-year range of Section~\ref{sec:servicelife}, and
+the ordering of offers that sit close together. These move if the
+coefficients move, and Section~\ref{sec:unresolved} argues they are
+conservative.
 
 \section{Session fade}
 
@@ -508,113 +558,6 @@ Section~\ref{sec:unresolved}: the cycle coefficient implies a cost per
 unit throughput two to four times the published band
 of~\cite{preis2023}, so these lives are conservative.
 
-\section{Provenance and limitations}
-\label{sec:provenance}
-
-\paragraph{LFP calendar: reproduced, not approximated.}
-The LFP calendar coefficients are Table~7 of Naumann et
-al.~\cite{naumann2018}, converted as stated in
-Table~\ref{tab:params}. The implementation reproduces that paper's own
-published projection --- \SI{19.0}{\percent} capacity loss at 20 years,
-\SI{25}{\celsius}, \SI{50}{\percent} SOC --- as \SI{19.01}{\percent},
-and agrees with their Eq.~(3) to a relative \num{1e-6} across
-temperatures \SIrange{0}{60}{\celsius}, all states of charge and
-horizons from six months to twenty years. Both checks are asserted in
-the test suite, so a later edit to a coefficient breaks a test rather
-than quietly invalidating the citation.
-
-\paragraph{NMC: Schmalstieg et al.\ (2014), reproduced.}
-All NMC coefficients are from Schmalstieg et al.~\cite{schmalstieg2014},
-a Sanyo UR18650E study of more than sixty cells covering calendar and
-cycle ageing. The calendar term is their Eq.~(14) in its published
-voltage form, with $V(s)$ from Fig.~1 digitised at \SI{1}{\percent}
-intervals; one year at \SI{25}{\celsius} and \SI{50}{\percent} SOC
-gives \SI{2.395}{\percent} against the \SI{2.390}{\percent} their
-equation gives directly, the residual being digitisation. The OCV curve
-reproduces both cell voltages their text states, \SI{3.7000}{\volt}
-against \num{3.699} at \SI{50}{\percent} SOC and \SI{4.1596}{\volt}
-against \num{4.162} at full, which is $+\SI{0.18}{\percent}$ and
-$-\SI{0.24}{\percent}$ in their ageing factor. The time exponent
-$\alpha = 0.75$ is their Section~3.2 choice, adopted after a $\sqrt{t}$
-law fitted their data poorly. The activation energy follows from their
-exponent $\exp(-6976/T)$, giving
-$E_a = 6976R = \SI{58002}{\joule\per\mole}$ (the paper, rounding $R$ to \num{8.314}, prints \SI{58.0}{\kilo\joule\per\mole}; the stored value reproduces their \emph{exponent} under CODATA $R$). The cycle terms are
-their Eq.~(20) in the additive branch of \eqref{eq:cyc}, including the
-mean-voltage term, with $\beta = 0.5$ from their Eq.~(18).
-
-Two earlier values are \emph{superseded}. An activation energy of
-\SI{24}{\kilo\joule\per\mole} understated temperature sensitivity by
-\num{2.42} and the \SIrange{25}{40}{\celsius} acceleration by
-\num{1.93}; it most plausibly came from the
-\SI{24.5}{\kilo\joule\per\mole} empirical fit of
-Wang/Purewal~\cite{wang2014}, a different cell. A depth coefficient of
-unity understated depth sensitivity \num{5.37}-fold against the ratio
-their Eq.~(20) prints.
-
-\paragraph{A citation error, corrected.}
-An earlier version of this work cited ``Schmalstieg et al.\ (2014)''
-against the title of Wang/Purewal et al.~\cite{wang2014,purewal2014},
-conflating two distinct 2014 \emph{J.\ Power Sources} papers. Purewal
-et al.\ is a physics-based chemical--mechanical model at fixed
-\SI{50}{\percent} depth of discharge, with no state-of-charge stress
-function, a $\sqrt{t}$ calendar term, and cycle ageing as Paris'-law
-fatigue crack growth ($m = 2.2$). None of it is used here; it is kept
-in the bibliography only because its Part~1 companion is the likely
-origin of the superseded activation energy.
-
-\paragraph{LFP cycle: Naumann et al.\ (2020), reproduced.}
-The companion cycle study~\cite{naumann2020} has since appeared: same
-Sony/Murata cell, 19 test points over 885 days. Its Eq.~(5),
-$Q^{\mathrm{cyc}}_{\mathrm{loss}} = k_T k_{C} k_{\mathrm{DOC}}
-\mathrm{FEC}^{0.5}$, supplies every LFP cycle coefficient here. The
-C-rate factor of their Eq.~(8), $k_C = 0.0630\,C + 0.0971$, normalised
-on its intercept gives $c_C = \num{0.648816}$ --- the coefficient that
-had no empirical support anywhere before this paper, and which the NMC
-branch still lacks because Schmalstieg et al.\ ran every cycle test at
-1C. The depth factor of their Eq.~(10) is \emph{cubic} in depth of
-cycle centred on \num{0.6}, not linear, which is why \eqref{eq:cyc}
-carries a $c_{D3}$ term. Both depth terms scale by $0.0971/200$ to give
-fade per equivalent full cycle. Their Section~3.2.1 reports the
-temperature influence on pure cycle ageing between \SI{25}{\celsius}
-and \SI{40}{\celsius} as negligible, so their model carries no cycle
-temperature term and neither does this one.
-
-One caveat travels with it, and it is the authors'\ own. Test points
-below \SI{80}{\percent} depth showed unsteady, partly reversible
-capacity loss whose mechanism they state is not understood, so
-$k_{\mathrm{DOC}}$ was fitted on the \SI{80}{\percent} and
-\SI{100}{\percent} points alone. Shallow cycling is therefore the
-least trustworthy region of this parameterisation, and V2G arbitrage
-sits squarely in it.
-
-\paragraph{Temperature.}
-Equation~\eqref{eq:arrhenius} propagates strongly. Pack temperature is
-held at a scenario constant here; fade precision beyond what that
-assumption supports should not be quoted.
-
-\paragraph{Multi-day coupling.}
-$N$ is a scenario input and is not advanced between sessions in the
-charge-only results. This is benign where $\varphi$ is small and
-$\sigma$ slowly varying, and degrades under V2G, where per-session
-throughput is several times larger.
-
-\paragraph{Asymmetric regularisation of the two power laws.}
-The cycle slope \eqref{eq:cycslope} is floored at $N^{\min}$, bounding
-$\sigma \le \beta (N^{\min})^{\beta-1} = \num{0.5}$ for a pack with no
-accumulated throughput. The age factor \eqref{eq:agefactor} carries no
-counterpart: $\psi$ grows without bound as $t \to 0$
-($\psi = \num{1.78}$ at \SI{0.1}{\yr}, \num{3.16} at \SI{0.01}{\yr} for
-NMC) and only a non-positive age is rejected. Both expressions are
-singular derivatives of the same power-law form, so the absence of a
-floor on one is an inconsistency rather than a modelling choice. Results
-for near-new packs should be treated with care until an explicit minimum
-anchor age is introduced.
-
-\paragraph{Depth measure.}
-Equation~\eqref{eq:delta} uses the full-session excursion as the depth
-proxy. Validation against rainflow counting is outstanding and should
-compare \emph{offer rankings} rather than absolute fade.
-
 \section{Unresolved}
 \label{sec:unresolved}
 
@@ -747,6 +690,122 @@ A \SI{3}{\ampere\hour} 26650 LFP cell and a \SI{2.05}{\ampere\hour}
 18650 NMC cell, each from one laboratory campaign, stand in for every
 pack of their chemistry. Cell-to-cell and pack-level variation is not
 represented.
+
+\appendix
+\section{Parameter provenance}
+\label{sec:provenance}
+
+Where every coefficient comes from, and which are not attributable.
+Placed in an appendix because the parameterisation is an input to this
+work rather than its subject -- see Section~\ref{sec:interface} -- but
+recorded in full, since two of the three branches are reproductions of
+published models and a reader substituting their own needs to know
+exactly what is being replaced.
+\label{sec:provenance}
+
+\paragraph{LFP calendar: reproduced, not approximated.}
+The LFP calendar coefficients are Table~7 of Naumann et
+al.~\cite{naumann2018}, converted as stated in
+Table~\ref{tab:params}. The implementation reproduces that paper's own
+published projection --- \SI{19.0}{\percent} capacity loss at 20 years,
+\SI{25}{\celsius}, \SI{50}{\percent} SOC --- as \SI{19.01}{\percent},
+and agrees with their Eq.~(3) to a relative \num{1e-6} across
+temperatures \SIrange{0}{60}{\celsius}, all states of charge and
+horizons from six months to twenty years. Both checks are asserted in
+the test suite, so a later edit to a coefficient breaks a test rather
+than quietly invalidating the citation.
+
+\paragraph{NMC: Schmalstieg et al.\ (2014), reproduced.}
+All NMC coefficients are from Schmalstieg et al.~\cite{schmalstieg2014},
+a Sanyo UR18650E study of more than sixty cells covering calendar and
+cycle ageing. The calendar term is their Eq.~(14) in its published
+voltage form, with $V(s)$ from Fig.~1 digitised at \SI{1}{\percent}
+intervals; one year at \SI{25}{\celsius} and \SI{50}{\percent} SOC
+gives \SI{2.395}{\percent} against the \SI{2.390}{\percent} their
+equation gives directly, the residual being digitisation. The OCV curve
+reproduces both cell voltages their text states, \SI{3.7000}{\volt}
+against \num{3.699} at \SI{50}{\percent} SOC and \SI{4.1596}{\volt}
+against \num{4.162} at full, which is $+\SI{0.18}{\percent}$ and
+$-\SI{0.24}{\percent}$ in their ageing factor. The time exponent
+$\alpha = 0.75$ is their Section~3.2 choice, adopted after a $\sqrt{t}$
+law fitted their data poorly. The activation energy follows from their
+exponent $\exp(-6976/T)$, giving
+$E_a = 6976R = \SI{58002}{\joule\per\mole}$ (the paper, rounding $R$ to \num{8.314}, prints \SI{58.0}{\kilo\joule\per\mole}; the stored value reproduces their \emph{exponent} under CODATA $R$). The cycle terms are
+their Eq.~(20) in the additive branch of \eqref{eq:cyc}, including the
+mean-voltage term, with $\beta = 0.5$ from their Eq.~(18).
+
+Two earlier values are \emph{superseded}. An activation energy of
+\SI{24}{\kilo\joule\per\mole} understated temperature sensitivity by
+\num{2.42} and the \SIrange{25}{40}{\celsius} acceleration by
+\num{1.93}; it most plausibly came from the
+\SI{24.5}{\kilo\joule\per\mole} empirical fit of
+Wang/Purewal~\cite{wang2014}, a different cell. A depth coefficient of
+unity understated depth sensitivity \num{5.37}-fold against the ratio
+their Eq.~(20) prints.
+
+\paragraph{A citation error, corrected.}
+An earlier version of this work cited ``Schmalstieg et al.\ (2014)''
+against the title of Wang/Purewal et al.~\cite{wang2014,purewal2014},
+conflating two distinct 2014 \emph{J.\ Power Sources} papers. Purewal
+et al.\ is a physics-based chemical--mechanical model at fixed
+\SI{50}{\percent} depth of discharge, with no state-of-charge stress
+function, a $\sqrt{t}$ calendar term, and cycle ageing as Paris'-law
+fatigue crack growth ($m = 2.2$). None of it is used here; it is kept
+in the bibliography only because its Part~1 companion is the likely
+origin of the superseded activation energy.
+
+\paragraph{LFP cycle: Naumann et al.\ (2020), reproduced.}
+The companion cycle study~\cite{naumann2020} has since appeared: same
+Sony/Murata cell, 19 test points over 885 days. Its Eq.~(5),
+$Q^{\mathrm{cyc}}_{\mathrm{loss}} = k_T k_{C} k_{\mathrm{DOC}}
+\mathrm{FEC}^{0.5}$, supplies every LFP cycle coefficient here. The
+C-rate factor of their Eq.~(8), $k_C = 0.0630\,C + 0.0971$, normalised
+on its intercept gives $c_C = \num{0.648816}$ --- the coefficient that
+had no empirical support anywhere before this paper, and which the NMC
+branch still lacks because Schmalstieg et al.\ ran every cycle test at
+1C. The depth factor of their Eq.~(10) is \emph{cubic} in depth of
+cycle centred on \num{0.6}, not linear, which is why \eqref{eq:cyc}
+carries a $c_{D3}$ term. Both depth terms scale by $0.0971/200$ to give
+fade per equivalent full cycle. Their Section~3.2.1 reports the
+temperature influence on pure cycle ageing between \SI{25}{\celsius}
+and \SI{40}{\celsius} as negligible, so their model carries no cycle
+temperature term and neither does this one.
+
+One caveat travels with it, and it is the authors'\ own. Test points
+below \SI{80}{\percent} depth showed unsteady, partly reversible
+capacity loss whose mechanism they state is not understood, so
+$k_{\mathrm{DOC}}$ was fitted on the \SI{80}{\percent} and
+\SI{100}{\percent} points alone. Shallow cycling is therefore the
+least trustworthy region of this parameterisation, and V2G arbitrage
+sits squarely in it.
+
+\paragraph{Temperature.}
+Equation~\eqref{eq:arrhenius} propagates strongly. Pack temperature is
+held at a scenario constant here; fade precision beyond what that
+assumption supports should not be quoted.
+
+\paragraph{Multi-day coupling.}
+$N$ is a scenario input and is not advanced between sessions in the
+charge-only results. This is benign where $\varphi$ is small and
+$\sigma$ slowly varying, and degrades under V2G, where per-session
+throughput is several times larger.
+
+\paragraph{Asymmetric regularisation of the two power laws.}
+The cycle slope \eqref{eq:cycslope} is floored at $N^{\min}$, bounding
+$\sigma \le \beta (N^{\min})^{\beta-1} = \num{0.5}$ for a pack with no
+accumulated throughput. The age factor \eqref{eq:agefactor} carries no
+counterpart: $\psi$ grows without bound as $t \to 0$
+($\psi = \num{1.78}$ at \SI{0.1}{\yr}, \num{3.16} at \SI{0.01}{\yr} for
+NMC) and only a non-positive age is rejected. Both expressions are
+singular derivatives of the same power-law form, so the absence of a
+floor on one is an inconsistency rather than a modelling choice. Results
+for near-new packs should be treated with care until an explicit minimum
+anchor age is introduced.
+
+\paragraph{Depth measure.}
+Equation~\eqref{eq:delta} uses the full-session excursion as the depth
+proxy. Validation against rainflow counting is outstanding and should
+compare \emph{offer rankings} rather than absolute fade.
 
 \begin{thebibliography}{9}
 
