@@ -175,13 +175,19 @@ PACK_COST_ALTERNATIVES = {
     "BNEF NMC new pack": 128.0,
 }
 
+from scipy.optimize import brentq
+
 from evmenu.catalog import EVModel
 from evmenu.degradation import (
     NAUMANN_LFP_2018_PARAMETERS,
+    NAUMANN_LFP_2020_CYCLE_PARAMETERS,
     SCHMALSTIEG_NMC_2014_PARAMETERS,
+    DegradationSettings,
 )
-from evmenu_v2g import V2GEnvelope, generate_ev_menu_v2g
+from evmenu.schemas import EVSpec
+from evmenu_v2g import THROUGHPUT_FRACTIONS_PER_FULL_CYCLE, V2GEnvelope, generate_ev_menu_v2g
 from evmenu_v2g.api import default_tou_profile
+from evmenu_v2g.fade import cycle_fade
 from evmenu_v2g.menu import V2GOffer, compact, pareto_filter
 
 MENU_SIZE = 15
@@ -637,3 +643,188 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# service life
+# ---------------------------------------------------------------------------
+#
+# Health is reported to the customer as years to 80% capacity under daily
+# repetition of the chosen session.  That needs no pack price, which is
+# why it replaced the monetary form: the price spanned an order of
+# magnitude between a used-pack residual and a new-pack quote.
+#
+# What it does need is care with three referrals, each of which was wrong
+# in a first attempt and each of which failed silently:
+#
+#   1. The commute.  An offer's throughput counts only grid exchanges, so
+#      the energy the customer drives away and uses was absent from the
+#      cycle term.  A life quoted as "years if you do this every day" has
+#      to include the drive.  Omitting it overstated life by 2% on the
+#      lightest offer and 12% on the heaviest.
+#
+#   2. The per-EFC rate.  One session is a fraction of a cycle, so its
+#      cycle fade is NOT the per-EFC rate.  Treating it as such
+#      understated the cumulative coefficient by 1/EFC_day and inflated
+#      every life by roughly threefold.
+#
+#   3. The calendar anchor.  An offer's calendar fade is measured at the
+#      scenario's pack age, where psi < 1.  The cumulative integral
+#      assumes the rate at the anchor age, so the measured rate must be
+#      divided by psi first.  Omitting that understated calendar fade by
+#      1/psi, here 1.32x.
+#
+# Both laws decelerate, so the cumulative loss is an integral and not a
+# multiplication.  Dividing the threshold by a daily rate treats both as
+# linear and overstates life by about 45%: a daily rate is a derivative.
+
+#: Capacity lost at end of life.  A threshold, not a failure.
+SERVICE_LIFE_THRESHOLD = END_OF_LIFE_CAPACITY_LOSS
+
+
+def trip_throughput_fraction(
+    capacity_kwh: float = KIA.usable_battery_kwh,
+    distance_km: float | None = None,
+    consumption_kwh_per_km: float = KIA.consumption_kwh_per_km,
+) -> float:
+    """Battery-side throughput of the commute, as a fraction of capacity.
+
+    This is the same quantity for every offer of a menu -- the trip does
+    not depend on which schedule was chosen -- so it changes no
+    comparison WITHIN a menu.  It is not therefore optional: it shifts
+    every service life, and by different amounts, because the constant
+    is a larger fraction of a light schedule's throughput than of a
+    heavy one's.
+    """
+    if distance_km is None:
+        distance_km = float(SESSION["next_trip_distance_km"])
+    return consumption_kwh_per_km * distance_km / capacity_kwh
+
+
+def _default_settings() -> DegradationSettings:
+    """The published parameter sets at the worked scenario's age and cycles."""
+    return DegradationSettings(
+        nmc=SCHMALSTIEG_NMC_2014_PARAMETERS,
+        lfp=NAUMANN_LFP_2020_CYCLE_PARAMETERS,
+        battery_age_years=float(SESSION["battery_age_years"]),
+        cumulative_equivalent_full_cycles=float(
+            SESSION["accumulated_equivalent_full_cycles"]
+        ),
+    )
+
+
+def daily_fade(
+    offer: V2GOffer,
+    settings: DegradationSettings | None = None,
+    capacity_kwh: float = KIA.usable_battery_kwh,
+) -> tuple[float, float, float]:
+    """One day's (calendar fade, cycle fade, equivalent full cycles).
+
+    Session plus commute.  The commute extends three inputs to the cycle
+    term and all three are recomputed rather than scaled:
+
+      throughput  gains the trip energy;
+      excursion   gains whatever the post-trip SOC adds below the
+                  session minimum, which on this scenario is only the
+                  lightest offers, since most already dip lower;
+      mean SOC    is averaged over session and post-trip state, which
+                  matters because the NMC cycle term carries a
+                  mean-voltage dependence.
+
+    Peak C-rate is left at the session value.  Driving 7.2 kWh over an
+    hour is about 0.09C on a 78 kWh pack, comparable to the charger, so
+    the trip does not raise the session peak.  A fast trip on a small
+    pack would, and this would then need revisiting.
+
+    Calendar fade is unchanged by the trip: the parked term already
+    prices the post-trip state of charge, and the window term covers
+    only the connected session.
+    """
+    if settings is None:
+        settings = _default_settings()
+    trip = trip_throughput_fraction(capacity_kwh)
+    soc = [e / capacity_kwh for e in offer.trajectory.battery_energy_kwh]
+    post_trip = offer.delivered_soc - trip
+
+    phi = offer.trajectory.fade.throughput_fraction + trip
+    delta = max(max(soc), offer.delivered_soc) - min(min(soc), post_trip)
+    mean_soc = (sum(soc) / len(soc) + post_trip) / 2.0
+
+    ev = EVSpec(
+        ev_id=KIA.model_id,
+        battery_capacity_kwh=capacity_kwh,
+        minimum_energy_kwh=KIA.minimum_soc * capacity_kwh,
+        charger_power_kw=KIA.onboard_ac_power_kw,
+        charging_efficiency=CHARGE_EFFICIENCY,
+        chemistry=KIA.chemistry,
+    )
+    cycle = cycle_fade(
+        ev=ev,
+        settings=settings,
+        phi=phi,
+        delta=delta,
+        chat=offer.peak_c_rate,
+        mean_soc=mean_soc,
+    )
+    calendar = offer.calendar_window_fade + offer.calendar_parked_fade
+    return calendar, cycle, phi / THROUGHPUT_FRACTIONS_PER_FULL_CYCLE
+
+
+def service_life_years(
+    offer: V2GOffer,
+    settings: DegradationSettings | None = None,
+    capacity_kwh: float = KIA.usable_battery_kwh,
+    threshold: float = SERVICE_LIFE_THRESHOLD,
+) -> float:
+    """Years to `threshold` capacity loss, repeating this session daily.
+
+    LIFE FROM NEW, not remaining life: both laws are integrated from
+    zero, so the answer is "a pack driven and charged this way every day
+    from new reaches 80% after T years".  Reporting remaining life would
+    need the same integrals evaluated between the current state and the
+    threshold, and would answer a different question.
+
+    Each rate is first referred back to its own anchor, then integrated:
+
+        calendar   rate at anchor age  = cal_day / psi(age)
+        cycle      rate per EFC at N   = cyc_day / EFC_day
+                   cumulative constant = that / (beta N^(beta-1))
+
+        Q(T) = 365 (cal_day/psi) T^alpha / alpha
+               + k (365 EFC_day T)^beta
+
+    and T solves Q(T) = threshold.
+    """
+    if settings is None:
+        settings = _default_settings()
+    params = settings.parameters_for(KIA.chemistry)
+    alpha = params.calendar_time_exponent
+    beta = params.cycle_time_exponent
+    cal_day, cyc_day, efc_day = daily_fade(offer, settings, capacity_kwh)
+
+    age = max(settings.battery_age_years, 1e-9)
+    psi = (age / settings.reference_age_years) ** (alpha - 1.0)
+    cal_anchor = cal_day / psi
+
+    reference_n = max(
+        settings.cumulative_equivalent_full_cycles, settings.minimum_effective_fec
+    )
+    k_cycle = 0.0
+    if efc_day > 0.0 and cyc_day > 0.0:
+        per_efc = cyc_day / efc_day
+        k_cycle = per_efc / (beta * reference_n ** (beta - 1.0))
+
+    def accumulated(years: float) -> float:
+        calendar = 365.0 * cal_anchor * years**alpha / alpha
+        cycle = k_cycle * (365.0 * efc_day * years) ** beta
+        return calendar + cycle - threshold
+
+    if accumulated(_SERVICE_LIFE_MAX_YEARS) < 0.0:
+        return float("inf")
+    return float(brentq(accumulated, 1e-3, _SERVICE_LIFE_MAX_YEARS))
+
+
+#: Upper bracket for the root find.  A life beyond this is reported as
+#: infinite rather than extrapolated: the parameterisation is fitted
+#: over months to a few years and says nothing useful at a century.
+_SERVICE_LIFE_MAX_YEARS = 500.0
