@@ -15,6 +15,7 @@ from scipy.optimize import minimize  # type: ignore[import-untyped]
 
 from evmenu.degradation import (
     _HOURS_PER_YEAR,
+    ChemistryDegradationParameters,
     DegradationSettings,
     _relative_age_factor,
     _temperature_factor,
@@ -22,6 +23,7 @@ from evmenu.degradation import (
     cycle_age_slope,
 )
 from evmenu.exceptions import PhysicalConstraintError
+from evmenu.ocv import SANYO_UR18650E_OCV, interpolate_ocv
 from evmenu.schemas import ChargingSession, EVSpec, PlanningSignal
 
 from .envelope import V2GEnvelope
@@ -352,6 +354,77 @@ def _cost_objective(ctx: RequestContext, x: _Vector) -> tuple[float, list[float]
     return value, jac
 
 
+
+def _calendar_stress_gradient(
+    soc_value: float, params: ChemistryDegradationParameters
+) -> float:
+    """d g(s) / d s, matching ``calendar_soc_stress`` branch for branch.
+
+    The optimiser previously differentiated only the hinge polynomial.
+    For a voltage-form parameter set (Schmalstieg NMC) that returned
+    zero everywhere, so the solver saw no calendar gradient at all
+    while calendar loss genuinely varied -- a feasible delayed schedule
+    with identical service and savings carried 13.4% less fade than the
+    schedule returned.
+    """
+    s_val = min(1.0, max(0.0, soc_value))
+    scale = getattr(params, "calendar_voltage_scale", 0.0)
+    if scale > 0.0:
+        curve = params.ocv_curve or SANYO_UR18650E_OCV
+        # the OCV curve is piecewise linear, so dV/ds is its local slope
+        step = 1.0e-5
+        lo, hi = max(0.0, s_val - step), min(1.0, s_val + step)
+        if hi <= lo:
+            return 0.0
+        dv = (interpolate_ocv(hi, curve) - interpolate_ocv(lo, curve)) / (hi - lo)
+        return float(scale * params.calendar_voltage_slope * dv)
+    hinge = max(s_val - params.calendar_soc_knee, 0.0)
+    gradient = params.calendar_a1 + 2.0 * params.calendar_a2 * hinge
+    cubic = getattr(params, "calendar_cubic_coefficient", 0.0)
+    if cubic:
+        centre = getattr(params, "calendar_cubic_center", 0.0)
+        gradient += 3.0 * cubic * (s_val - centre) ** 2
+    return float(gradient)
+
+
+def _cycle_depth_factor(
+    delta: float, mean_soc: float, params: ChemistryDegradationParameters
+) -> float:
+    """Gamma(delta, Vbar), matching the evaluator's additive branch."""
+    c0 = params.cycle_reference_coefficient
+    c_d = params.cycle_dod_coefficient
+    if not getattr(params, "cycle_depth_is_additive", False):
+        return float(c0 * (1.0 + c_d * delta))
+    value = c0 + c_d * delta
+    cubic = getattr(params, "cycle_depth_cubic_coefficient", 0.0)
+    if cubic:
+        centre = getattr(params, "cycle_depth_cubic_center", 0.0)
+        value += cubic * (delta - centre) ** 3
+    c_v = getattr(params, "cycle_mean_voltage_coefficient", 0.0)
+    if c_v:
+        centre_v = getattr(params, "cycle_mean_voltage_center", 0.0)
+        curve = params.ocv_curve or SANYO_UR18650E_OCV
+        voltage = interpolate_ocv(min(1.0, max(0.0, mean_soc)), curve)
+        value += c_v * (voltage - centre_v) ** 2
+    return float(value)
+
+
+def _cycle_depth_gradient(
+    delta: float, params: ChemistryDegradationParameters
+) -> float:
+    """d Gamma / d delta.  The mean-voltage term does not depend on delta."""
+    c0 = params.cycle_reference_coefficient
+    c_d = params.cycle_dod_coefficient
+    if not getattr(params, "cycle_depth_is_additive", False):
+        return float(c0 * c_d)
+    gradient = c_d
+    cubic = getattr(params, "cycle_depth_cubic_coefficient", 0.0)
+    if cubic:
+        centre = getattr(params, "cycle_depth_cubic_center", 0.0)
+        gradient += 3.0 * cubic * (delta - centre) ** 2
+    return float(gradient)
+
+
 def _fade_objective(
     ctx: RequestContext, x: _Vector, *, guard_weight: float = 0.0
 ) -> tuple[float, list[float]]:
@@ -402,8 +475,7 @@ def _fade_objective(
     for j in range(n):
         acc = 0.0
         for k in range(j + 1, n):
-            hinge = max(soc[k] - params.calendar_soc_knee, 0.0)
-            acc += (params.calendar_a1 + 2.0 * params.calendar_a2 * hinge) * weights[k]
+            acc += _calendar_stress_gradient(soc[k], params) * weights[k]
         jac[j] += acc * eta_in / b_max
         jac[n + j] += -acc / (eta_out * b_max)
 
@@ -428,13 +500,18 @@ def _fade_objective(
         throughput_exponent=params.cycle_time_exponent,
         minimum_fec=settings.minimum_effective_fec,
     )
-    c0, c_d, c_c = (
-        params.cycle_reference_coefficient,
-        params.cycle_dod_coefficient,
-        params.cycle_c_rate_coefficient,
-    )
-    depth_f, rate_f = 1.0 + c_d * delta, 1.0 + c_c * chat
-    cyc = c0 * depth_f * rate_f * slope * phi
+    c_c = params.cycle_c_rate_coefficient
+    # Gamma must follow the SAME branch the evaluator uses.  The
+    # optimiser previously hard-coded the multiplicative form while the
+    # published NMC and LFP-2020 sets are additive with cubic depth and
+    # a mean-voltage term, so it minimised a different function from the
+    # one reported -- evaluated cycle fade came out 3.65x the
+    # optimiser's value on an NMC check.
+    mean_soc = sum(soc) / len(soc)
+    depth_f = _cycle_depth_factor(delta, mean_soc, params)
+    ddepth = _cycle_depth_gradient(delta, params)
+    rate_f = 1.0 + c_c * chat
+    cyc = depth_f * rate_f * slope * phi
 
     # d(phi), d(delta), d(chat) -- subgradients at the active indices.
     for j in range(n):
@@ -453,13 +530,16 @@ def _fade_objective(
             if chat_arg == ("out", j)
             else 0.0
         )
-        jac[j] += c0 * slope * (
-            c_d * ddelta_u * rate_f * phi
+        # Gamma is now a function, so its delta-derivative comes from
+        # _cycle_depth_gradient rather than the bare c0 * c_d that the
+        # multiplicative form happened to have.
+        jac[j] += slope * (
+            ddepth * ddelta_u * rate_f * phi
             + depth_f * c_c * dchat_u * phi
             + depth_f * rate_f * dphi_u
         )
-        jac[n + j] += c0 * slope * (
-            c_d * ddelta_v * rate_f * phi
+        jac[n + j] += slope * (
+            ddepth * ddelta_v * rate_f * phi
             + depth_f * c_c * dchat_v * phi
             + depth_f * rate_f * dphi_v
         )

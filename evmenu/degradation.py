@@ -1238,7 +1238,11 @@ def assess_candidate_degradation(
             calendar_soc_stress(parked_soc, params)
             * _temperature_factor(
                 parked_temperature,
-                model.reference_temperature_c,
+                # the SAME per-chemistry anchor the window term resolves
+                # above; this site was left on the scenario default, so
+                # parked and window fade were normalised against
+                # different reference temperatures within one assessment
+                reference_temperature_c,
                 params.activation_energy_j_per_mol,
             )
             * age_factor
@@ -1472,6 +1476,17 @@ def score_generated_menu(
         ev_id=ev.ev_id,
         offers=tuple(offers),
         assessments=assessments,
+    )
+
+
+
+_HOURS_PER_DAY = 24.0
+
+
+def _session_hours(session: ChargingSession, signal: PlanningSignal) -> float:
+    """Connected hours of the session, from the signal's own durations."""
+    return float(
+        sum(signal.interval_durations[session.arrival_step : session.departure_step])
     )
 
 

@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 from evmenu.degradation import (
     _HOURS_PER_YEAR,
+    ChemistryDegradationParameters,
     DegradationSettings,
     _relative_age_factor,
     _temperature_factor,
@@ -60,6 +61,29 @@ class BidirectionalFade:
         return self.throughput_fraction / THROUGHPUT_FRACTIONS_PER_FULL_CYCLE
 
 
+
+def _reference_temperature_c(
+    settings: DegradationSettings, params: ChemistryDegradationParameters
+) -> float:
+    """The reference temperature the parameters were anchored at.
+
+    A published parameter set carries its own anchor -- both Naumann
+    (2018) and Schmalstieg (2014) report at 25 C -- and the Arrhenius
+    factor must be normalised against that, not against a global
+    setting.  Reading ``settings.reference_temperature_c`` instead
+    applied a 30 C anchor to 25 C parameters, giving theta = 0.6798
+    where it should be 1.0000 and understating NMC calendar fade by
+    47%.
+
+    The per-chemistry value wins when declared; the settings value
+    remains the fallback for parameter sets that do not carry one.
+    """
+    declared = getattr(params, "calendar_reference_temperature_c", None)
+    if declared is None:
+        return float(settings.reference_temperature_c)
+    return float(declared)
+
+
 def calendar_window_fade(
     *,
     ev: EVSpec,
@@ -92,7 +116,7 @@ def calendar_window_fade(
             calendar_soc_stress(clamped, params)
             * _temperature_factor(
                 temperature,
-                settings.reference_temperature_c,
+                _reference_temperature_c(settings, params),
                 params.activation_energy_j_per_mol,
             )
             * age_factor
@@ -118,6 +142,7 @@ def calendar_parked_fade(
     """
     if settings.parked_day_hours is None:
         return 0.0
+    parked_hours = float(settings.parked_day_hours)
     params = settings.parameters_for(ev.chemistry)
     age_factor = _relative_age_factor(
         age_years=settings.battery_age_years,
@@ -136,11 +161,11 @@ def calendar_parked_fade(
         calendar_soc_stress(parked_soc, params)
         * _temperature_factor(
             temperature,
-            settings.reference_temperature_c,
+            _reference_temperature_c(settings, params),
             params.activation_energy_j_per_mol,
         )
         * age_factor
-        * settings.parked_day_hours
+        * parked_hours
         / _HOURS_PER_YEAR
     )
 

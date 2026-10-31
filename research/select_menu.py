@@ -678,27 +678,52 @@ if __name__ == "__main__":
 # multiplication.  Dividing the threshold by a daily rate treats both as
 # linear and overstates life by about 45%: a daily rate is a derivative.
 
+_HOURS_PER_DAY = 24.0
+
+
+def _session_hours() -> float:
+    """Connected hours of the worked session."""
+    start = _minute_of(SESSION["arrival_time"])
+    end = _minute_of(SESSION["departure_time"])
+    if end <= start:
+        end += 1440
+    return (end - start) / 60.0
+
+
+def _minute_of(clock: str) -> int:
+    hours, _, minutes = clock.partition(":")
+    return int(hours) * 60 + int(minutes)
+
+
 #: Capacity lost at end of life.  A threshold, not a failure.
 SERVICE_LIFE_THRESHOLD = END_OF_LIFE_CAPACITY_LOSS
 
 
-def trip_throughput_fraction(
-    capacity_kwh: float = KIA.usable_battery_kwh,
-    distance_km: float | None = None,
-    consumption_kwh_per_km: float = KIA.consumption_kwh_per_km,
-) -> float:
-    """Battery-side throughput of the commute, as a fraction of capacity.
+def daily_discharge_fraction(offer: V2GOffer) -> float:
+    """Energy the customer uses each day, as a fraction of capacity.
 
-    This is the same quantity for every offer of a menu -- the trip does
-    not depend on which schedule was chosen -- so it changes no
-    comparison WITHIN a menu.  It is not therefore optional: it shifts
-    every service life, and by different amounts, because the constant
-    is a larger fraction of a light schedule's throughput than of a
-    heavy one's.
+    The closing condition.  The car arrives at the same state of charge
+    every day, so whatever a schedule puts IN must come back OUT before
+    the next arrival:
+
+        discharge = delivered SOC - arrival SOC
+
+    This is a per-offer quantity, not a scenario constant.  An offer
+    delivering 100% from a 65% arrival implies a 35-point daily drive;
+    the decline row implies none.  The implied distance therefore
+    differs across the menu, and the service life quoted against each
+    offer is the life of a customer whose usage matches that offer.
+
+    A fixed commute instead would not close: with every session forced
+    to start at 65%, the decline row ended each day at 55.8% and the
+    full-charge row at 90.8%, so the model silently conjured or
+    discarded energy and omitted its degradation.
     """
-    if distance_km is None:
-        distance_km = float(SESSION["next_trip_distance_km"])
-    return consumption_kwh_per_km * distance_km / capacity_kwh
+    return max(0.0, offer.delivered_soc - _arrival_soc())
+
+
+def _arrival_soc() -> float:
+    return float(SESSION["current_soc"])
 
 
 def _default_settings() -> DegradationSettings:
@@ -742,13 +767,18 @@ def daily_fade(
     """
     if settings is None:
         settings = _default_settings()
-    trip = trip_throughput_fraction(capacity_kwh)
+    discharge = daily_discharge_fraction(offer)
     soc = [e / capacity_kwh for e in offer.trajectory.battery_energy_kwh]
-    post_trip = offer.delivered_soc - trip
 
-    phi = offer.trajectory.fade.throughput_fraction + trip
-    delta = max(max(soc), offer.delivered_soc) - min(min(soc), post_trip)
-    mean_soc = (sum(soc) / len(soc) + post_trip) / 2.0
+    # The day's throughput is the session's grid exchanges plus the
+    # discharge that returns the pack to tomorrow's arrival state.
+    phi = offer.trajectory.fade.throughput_fraction + discharge
+    # The discharge ends where the session began, so it extends the
+    # excursion only if the session never went that low -- which it
+    # cannot, since the session starts there.  Kept explicit so the
+    # invariant is visible rather than assumed.
+    delta = max(max(soc), offer.delivered_soc) - min(min(soc), _arrival_soc())
+    mean_soc = (sum(soc) / len(soc) + _arrival_soc()) / 2.0
 
     ev = EVSpec(
         ev_id=KIA.model_id,
@@ -766,7 +796,21 @@ def daily_fade(
         chat=offer.peak_c_rate,
         mean_soc=mean_soc,
     )
-    calendar = offer.calendar_window_fade + offer.calendar_parked_fade
+    # The day must be 24 hours.  The offer's two calendar terms cover
+    # the connected session plus settings.parked_day_hours, which is a
+    # scenario input and not a remainder -- for the worked session that
+    # is 11 + 16 = 27 hours, so repeating it 365 times a year accrued
+    # 1.125 years of calendar ageing per calendar year.
+    #
+    # Rescaling the parked term rather than clamping it inside the fade
+    # model is deliberate: parked_day_hours has a second legitimate use,
+    # reproducing published multi-year anchors, and clamping there broke
+    # it.  Service life is the only place a 24-hour budget is implied.
+    session_hours = _session_hours()
+    parked_hours = max(0.0, _HOURS_PER_DAY - session_hours)
+    declared_parked = float(settings.parked_day_hours or 0.0)
+    scale = parked_hours / declared_parked if declared_parked > 0.0 else 0.0
+    calendar = offer.calendar_window_fade + offer.calendar_parked_fade * scale
     return calendar, cycle, phi / THROUGHPUT_FRACTIONS_PER_FULL_CYCLE
 
 
