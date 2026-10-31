@@ -179,15 +179,19 @@ from scipy.optimize import brentq
 
 from evmenu.catalog import EVModel
 from evmenu.degradation import (
+    _HOURS_PER_YEAR,
     NAUMANN_LFP_2018_PARAMETERS,
     NAUMANN_LFP_2020_CYCLE_PARAMETERS,
     SCHMALSTIEG_NMC_2014_PARAMETERS,
     DegradationSettings,
+    _relative_age_factor,
+    _temperature_factor,
+    calendar_soc_stress,
 )
 from evmenu.schemas import EVSpec
 from evmenu_v2g import THROUGHPUT_FRACTIONS_PER_FULL_CYCLE, V2GEnvelope, generate_ev_menu_v2g
 from evmenu_v2g.api import default_tou_profile
-from evmenu_v2g.fade import cycle_fade
+from evmenu_v2g.fade import _reference_temperature_c, cycle_fade
 from evmenu_v2g.menu import V2GOffer, compact, pareto_filter
 
 MENU_SIZE = 15
@@ -806,12 +810,59 @@ def daily_fade(
     # model is deliberate: parked_day_hours has a second legitimate use,
     # reproducing published multi-year anchors, and clamping there broke
     # it.  Service life is the only place a 24-hour budget is implied.
-    session_hours = _session_hours()
-    parked_hours = max(0.0, _HOURS_PER_DAY - session_hours)
-    declared_parked = float(settings.parked_day_hours or 0.0)
-    scale = parked_hours / declared_parked if declared_parked > 0.0 else 0.0
-    calendar = offer.calendar_window_fade + offer.calendar_parked_fade * scale
+    parked_hours = max(0.0, _HOURS_PER_DAY - _session_hours())
+    calendar = offer.calendar_window_fade + _parked_fade(
+        offer, settings, parked_hours, capacity_kwh
+    )
     return calendar, cycle, phi / THROUGHPUT_FRACTIONS_PER_FULL_CYCLE
+
+
+
+def _parked_fade(
+    offer: V2GOffer,
+    settings: DegradationSettings,
+    parked_hours: float,
+    capacity_kwh: float,
+) -> float:
+    """Calendar fade while parked, at the SOC this schedule actually leaves.
+
+    Recomputed rather than taken from ``offer.calendar_parked_fade``,
+    which prices the pack sitting at `delivered SOC minus the scenario's
+    AVERAGE commute`.  That average is a scenario constant and has
+    nothing to do with the schedule chosen, so under the closing
+    condition it is simply the wrong state: the discharge is the SOC
+    this offer charged, `delivered - arrival`, which returns the pack to
+    the arrival SOC.
+
+    The consequence is that parked fade becomes identical across the
+    menu -- every schedule parks at the same state because every
+    schedule returns there.  It therefore stops discriminating between
+    offers, and the calendar differences that remain are entirely in the
+    connected window, where the schedule genuinely does differ.  That is
+    the honest outcome of the closing condition, not a loss of
+    information: the previous spread in parked fade was an artefact of
+    pricing a constant commute against a varying terminal state.
+    """
+    if parked_hours <= 0.0:
+        return 0.0
+    params = settings.parameters_for(KIA.chemistry)
+    age_factor = _relative_age_factor(
+        age_years=settings.battery_age_years,
+        alpha_time=params.calendar_time_exponent,
+        reference_age_years=settings.reference_age_years,
+    )
+    parked_soc = min(1.0, max(0.0, _arrival_soc()))
+    return (
+        calendar_soc_stress(parked_soc, params)
+        * _temperature_factor(
+            settings.fallback_temperature_c,
+            _reference_temperature_c(settings, params),
+            params.activation_energy_j_per_mol,
+        )
+        * age_factor
+        * parked_hours
+        / _HOURS_PER_YEAR
+    )
 
 
 def service_life_years(
